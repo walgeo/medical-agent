@@ -2652,8 +2652,8 @@ export class SseEventPublisher implements IEventPublisher {
     }
 
     const preferredModels = [
-      join(bundleRoot, 'models', 'es_MX-ald-medium.onnx'),
       join(bundleRoot, 'models', 'es_MX-claude-high.onnx'),
+      join(bundleRoot, 'models', 'es_MX-ald-medium.onnx'),
     ];
 
     for (const modelPath of preferredModels) {
