@@ -188,7 +188,7 @@ export class SseEventPublisher implements IEventPublisher {
       }
 
       // Serve Angular static files
-      const staticDir = process.env.STATIC_DIR ?? join(process.cwd(), 'public');
+      const staticDir = process.env.STATIC_DIR ?? join(process.cwd(), 'public', 'browser');
       void this.serveStaticFile(req, res, staticDir);
     });
 
