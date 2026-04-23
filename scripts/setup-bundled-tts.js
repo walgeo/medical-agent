@@ -12,10 +12,11 @@ const modelRoot = path.join(bundleRoot, 'models');
 const piperReleaseTag = process.env.TTS_BUNDLED_PIPER_RELEASE || '2023.11.14-2';
 const piperReleaseBase = `https://github.com/rhasspy/piper/releases/download/${piperReleaseTag}`;
 
-const modelUrl = process.env.TTS_BUNDLED_MODEL_URL || 'https://huggingface.co/rhasspy/piper-voices/resolve/v1.0.0/es/es_MX/claude/high/es_MX-claude-high.onnx';
-const modelConfigUrl = process.env.TTS_BUNDLED_MODEL_CONFIG_URL || 'https://huggingface.co/rhasspy/piper-voices/resolve/v1.0.0/es/es_MX/claude/high/es_MX-claude-high.onnx.json';
-const modelPath = path.join(modelRoot, 'es_MX-claude-high.onnx');
-const modelConfigPath = path.join(modelRoot, 'es_MX-claude-high.onnx.json');
+const modelName = process.env.TTS_BUNDLED_MODEL_NAME || 'es_MX-ald-medium.onnx';
+const modelUrl = process.env.TTS_BUNDLED_MODEL_URL || `https://huggingface.co/rhasspy/piper-voices/resolve/v1.0.0/es/es_MX/ald/medium/${modelName}`;
+const modelConfigUrl = process.env.TTS_BUNDLED_MODEL_CONFIG_URL || `${modelUrl}.json`;
+const modelPath = path.join(modelRoot, modelName);
+const modelConfigPath = path.join(modelRoot, `${modelName}.json`);
 
 function log(msg) {
   process.stdout.write(`[setup-bundled-tts] ${msg}\n`);
@@ -198,7 +199,7 @@ async function main() {
   ensureExecutable(resolvedPiper);
 
   if (!fileExists(modelPath)) {
-    log('Descargando modelo de voz base (es_MX-claude-high)...');
+    log(`Descargando modelo de voz base (${modelName})...`);
     await requestWithRedirect(modelUrl, modelPath);
   } else {
     log(`Modelo ya disponible: ${modelPath}`);

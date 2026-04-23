@@ -2646,9 +2646,20 @@ export class SseEventPublisher implements IEventPublisher {
     }
 
     const bundleRoot = process.env.TTS_BUNDLED_DIR?.trim() || join(process.cwd(), 'vendor', 'tts');
-    const bundledModel = process.env.TTS_BUNDLED_MODEL?.trim() || join(bundleRoot, 'models', 'es_MX-claude-high.onnx');
-    if (existsSync(bundledModel)) {
+    const bundledModel = process.env.TTS_BUNDLED_MODEL?.trim();
+    if (bundledModel && existsSync(bundledModel)) {
       return bundledModel;
+    }
+
+    const preferredModels = [
+      join(bundleRoot, 'models', 'es_MX-ald-medium.onnx'),
+      join(bundleRoot, 'models', 'es_MX-claude-high.onnx'),
+    ];
+
+    for (const modelPath of preferredModels) {
+      if (existsSync(modelPath)) {
+        return modelPath;
+      }
     }
 
     return '';
