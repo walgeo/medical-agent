@@ -89,8 +89,8 @@ export interface UiConfig {
 
 @Injectable({ providedIn: 'root' })
 export class MedicalAgentEventsService {
-  private readonly url = 'http://localhost:7071/events';
-  private readonly apiBaseUrl = 'http://localhost:7071';
+  private readonly apiBaseUrl = (window as any).__API_BASE_URL__ ?? 'http://localhost:7071';
+  private readonly url = `${this.apiBaseUrl}/events`;
   private readonly MAX_RETRIES = 10;
   private readonly RETRY_DELAY_MS = 5000;
 

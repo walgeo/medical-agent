@@ -24,8 +24,9 @@ const recommendationGovernance = new InMemoryRecommendationGovernance();
 const appointmentStore = new MockAppointmentStore();
 const appointmentService = new MockAppointmentService(appointmentStore);
 const appointmentUpdater = new MockAppointmentUpdater(appointmentStore);
+const PORT = parseInt(process.env.PORT ?? '7071', 10);
 const eventPublisher = new SseEventPublisher(
-  7071,
+  PORT,
   '/events',
   logger,
   recommendationGovernance,

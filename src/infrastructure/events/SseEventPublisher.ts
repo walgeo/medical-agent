@@ -3,7 +3,7 @@ import { spawn, spawnSync } from 'child_process';
 import { tmpdir } from 'os';
 import { join } from 'path';
 import { existsSync, readdirSync } from 'fs';
-import { readFile, unlink } from 'fs/promises';
+import { readFile, unlink, stat } from 'fs/promises';
 import { randomUUID } from 'crypto';
 import { AgentEvent } from '../../domain/events/AgentEvent';
 import { IAppointmentUpdater } from '../../domain/ports/IAppointmentUpdater';
@@ -187,8 +187,9 @@ export class SseEventPublisher implements IEventPublisher {
         return;
       }
 
-      res.statusCode = 404;
-      res.end('Not Found');
+      // Serve Angular static files
+      const staticDir = join(__dirname, '..', 'public');
+      void this.serveStaticFile(req, res, staticDir);
     });
 
     this.server.listen(this.port, () => {
@@ -2767,6 +2768,55 @@ export class SseEventPublisher implements IEventPublisher {
     res.statusCode = statusCode;
     res.setHeader('Content-Type', 'application/json; charset=utf-8');
     res.end(JSON.stringify(payload));
+  }
+
+  private async serveStaticFile(req: IncomingMessage, res: ServerResponse, staticDir: string): Promise<void> {
+    const MIME: Record<string, string> = {
+      '.html': 'text/html',
+      '.js': 'application/javascript',
+      '.css': 'text/css',
+      '.json': 'application/json',
+      '.ico': 'image/x-icon',
+      '.png': 'image/png',
+      '.svg': 'image/svg+xml',
+      '.woff2': 'font/woff2',
+      '.woff': 'font/woff',
+      '.ttf': 'font/ttf',
+    };
+    const { extname } = await import('path');
+    const urlPath = new URL(req.url ?? '/', `http://localhost`).pathname;
+    let filePath = join(staticDir, urlPath === '/' ? 'index.html' : urlPath);
+
+    try {
+      await stat(filePath);
+    } catch {
+      // SPA fallback: serve index.html for Angular routing
+      filePath = join(staticDir, 'index.html');
+    }
+
+    try {
+      let content = await readFile(filePath);
+      const ext = extname(filePath);
+      const mimeType = MIME[ext] ?? 'application/octet-stream';
+      res.statusCode = 200;
+      res.setHeader('Content-Type', mimeType);
+      // Inject API base URL into index.html for Angular
+      if (filePath.endsWith('index.html')) {
+        const host = req.headers.host ?? `localhost:${this.port}`;
+        const protocol = process.env.NODE_ENV === 'production' ? 'https' : 'http';
+        const apiBase = `${protocol}://${host}`;
+        const injected = content.toString().replace(
+          '<head>',
+          `<head><script>window.__API_BASE_URL__="${apiBase}";</script>`,
+        );
+        res.end(injected);
+        return;
+      }
+      res.end(content);
+    } catch {
+      res.statusCode = 404;
+      res.end('Not Found');
+    }
   }
 
   private setCorsHeaders(res: ServerResponse): void {
