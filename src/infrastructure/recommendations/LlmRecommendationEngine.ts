@@ -14,6 +14,10 @@ export class LlmRecommendationEngine implements IRecommendationEngine {
   private readonly provider: LlmProvider;
   private readonly resolvedApiUrl: string;
   private readonly requestTimeoutMs: number;
+  private readonly retryAfterMs: number;
+  private readonly authRetryAfterMs: number;
+  private disabledUntilMs = 0;
+  private disableReason = '';
 
   constructor(
     private readonly logger: ILogger,
@@ -24,6 +28,8 @@ export class LlmRecommendationEngine implements IRecommendationEngine {
     this.provider = this.readProvider();
     this.resolvedApiUrl = this.resolveApiUrl();
     this.requestTimeoutMs = this.readTimeoutMs();
+    this.retryAfterMs = this.readRetryAfterMs();
+    this.authRetryAfterMs = this.readAuthRetryAfterMs();
   }
 
   async recommend(
@@ -32,6 +38,7 @@ export class LlmRecommendationEngine implements IRecommendationEngine {
   ): Promise<AppointmentRecommendation | null> {
     if (!this.resolvedApiUrl) return null;
     if (appointment.status !== AppointmentStatus.Active) return null;
+    if (Date.now() < this.disabledUntilMs) return null;
 
     // Si falla o tarda, retorna null para activar fallback heuristico.
     const controller = new AbortController();
@@ -82,8 +89,14 @@ export class LlmRecommendationEngine implements IRecommendationEngine {
 
       if (!response.ok) {
         this.logger.log('LLM_RECOMMENDATION_HTTP_ERROR', `status=${response.status}`);
+        this.applyCircuitBreaker(response.status);
         clearTimeout(timeout);
         return null;
+      }
+
+      if (this.disabledUntilMs > 0) {
+        this.disabledUntilMs = 0;
+        this.disableReason = '';
       }
 
       const data = (await response.json()) as {
@@ -102,8 +115,36 @@ export class LlmRecommendationEngine implements IRecommendationEngine {
       clearTimeout(timeout);
       const detail = error instanceof Error ? error.message : 'unknown error';
       this.logger.log('LLM_RECOMMENDATION_ERROR', detail);
+      this.applyCircuitBreaker();
       return null;
     }
+  }
+
+  private applyCircuitBreaker(statusCode?: number): void {
+    const now = Date.now();
+
+    let holdMs = this.retryAfterMs;
+    let reason = 'transient_error';
+
+    if (statusCode === 401 || statusCode === 403) {
+      holdMs = this.authRetryAfterMs;
+      reason = `auth_error_${statusCode}`;
+    } else if (statusCode === 429) {
+      holdMs = Math.max(this.retryAfterMs, 120_000);
+      reason = 'rate_limited';
+    }
+
+    const nextDisabledUntil = now + holdMs;
+    if (nextDisabledUntil <= this.disabledUntilMs && reason === this.disableReason) {
+      return;
+    }
+
+    this.disabledUntilMs = nextDisabledUntil;
+    this.disableReason = reason;
+    this.logger.log(
+      'LLM_RECOMMENDATION_DISABLED',
+      `Deshabilitado temporalmente (${reason}) por ${Math.round(holdMs / 1000)}s.`,
+    );
   }
 
   private readProvider(): LlmProvider {
@@ -141,6 +182,26 @@ export class LlmRecommendationEngine implements IRecommendationEngine {
         `Timeout invalido '${raw}', usando 12000ms.`,
       );
       return 12000;
+    }
+
+    return Math.round(parsed);
+  }
+
+  private readRetryAfterMs(): number {
+    const raw = process.env.RECOMMENDATION_LLM_RETRY_AFTER_MS ?? '300000';
+    const parsed = Number(raw);
+    if (!Number.isFinite(parsed) || parsed < 10_000) {
+      return 300_000;
+    }
+
+    return Math.round(parsed);
+  }
+
+  private readAuthRetryAfterMs(): number {
+    const raw = process.env.RECOMMENDATION_LLM_AUTH_RETRY_AFTER_MS ?? '3600000';
+    const parsed = Number(raw);
+    if (!Number.isFinite(parsed) || parsed < 60_000) {
+      return 3_600_000;
     }
 
     return Math.round(parsed);

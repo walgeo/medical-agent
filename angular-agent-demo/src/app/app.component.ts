@@ -344,7 +344,7 @@ export class AppComponent implements OnInit, OnDestroy {
     this.trackingTimer = setInterval(() => {
       this.flushPendingDoctorCalls();
       void this.refreshTrackedAppointments();
-    }, 12000);
+    }, 20000);
 
     this.dailyCheckTimer = setInterval(() => {
       void this.handleDayRollover();

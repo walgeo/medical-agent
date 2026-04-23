@@ -52,23 +52,20 @@ export class VoiceCallQueueService {
   constructor(private readonly eventsService: MedicalAgentEventsService) {
     if (typeof window !== 'undefined' && 'speechSynthesis' in window) {
       this.synth = window.speechSynthesis;
-      console.log('[VoiceCallQueue] Web Speech API inicializado');
+      this.debug('[VoiceCallQueue] Web Speech API inicializado');
       
       // Cargar voces disponibles
       const loadVoices = () => {
         if (this.synth) {
           const voices = this.synth.getVoices();
-          console.log(`[VoiceCallQueue] Voces disponibles: ${voices.length}`);
-          voices.forEach((voice, idx) => {
-            console.log(`  ${idx}: ${voice.name} (${voice.lang})`);
-          });
+          this.debug(`[VoiceCallQueue] Voces disponibles: ${voices.length}`);
           
           // Intentar encontrar voz local de español para evitar synthesis-failed por voz remota/incompatible
           this.preferredVoice = voices.find((v) => v.lang.toLowerCase().startsWith('es') && v.localService)
             || voices.find((v) => v.lang.toLowerCase().startsWith('es'))
             || null;
           if (this.preferredVoice) {
-            console.log(`[VoiceCallQueue] Voz seleccionada: ${this.preferredVoice.name} (${this.preferredVoice.lang})`);
+            this.debug(`[VoiceCallQueue] Voz seleccionada: ${this.preferredVoice.name} (${this.preferredVoice.lang})`);
             this.updateDiagnostics({
               voicesDetected: voices.length,
               selectedVoice: `${this.preferredVoice.name} (${this.preferredVoice.lang})`,
