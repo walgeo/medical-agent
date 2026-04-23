@@ -34,15 +34,34 @@ const eventPublisher = new SseEventPublisher(
   appointmentUpdater,
 );
 const heuristicRecommendationEngine = new HeuristicRecommendationEngine();
-const llmRecommendationEngine = new LlmRecommendationEngine(logger);
-const recommendationEngine = new FallbackRecommendationEngine(
-  llmRecommendationEngine,
-  heuristicRecommendationEngine,
-);
+const recommendationLlmUrl = process.env.RECOMMENDATION_LLM_URL ?? '';
+const llmDisabledByEnv = (process.env.RECOMMENDATION_LLM_ENABLED ?? 'true').toLowerCase() === 'false';
+const llmLocalhostInProd =
+  process.env.NODE_ENV === 'production' && /(localhost|127\.0\.0\.1)/i.test(recommendationLlmUrl);
+const enableLlmEngines = !llmDisabledByEnv && !llmLocalhostInProd && recommendationLlmUrl.length > 0;
 
-const llmDecisionEngine = new LlmDecisionEngine(logger);
+const recommendationEngine = enableLlmEngines
+  ? new FallbackRecommendationEngine(
+      new LlmRecommendationEngine(logger),
+      heuristicRecommendationEngine,
+    )
+  : heuristicRecommendationEngine;
+
+if (!enableLlmEngines) {
+  logger.log(
+    'LLM_ENGINES_DISABLED',
+    llmDisabledByEnv
+      ? 'Motores LLM desactivados por RECOMMENDATION_LLM_ENABLED=false.'
+      : llmLocalhostInProd
+        ? 'Motores LLM desactivados: RECOMMENDATION_LLM_URL apunta a localhost en produccion.'
+        : 'Motores LLM desactivados: URL no configurada.',
+  );
+}
+
 const heuristicDecisionEngine = new HeuristicDecisionEngine();
-const decisionEngine = new FallbackDecisionEngine(llmDecisionEngine, heuristicDecisionEngine);
+const decisionEngine = enableLlmEngines
+  ? new FallbackDecisionEngine(new LlmDecisionEngine(logger), heuristicDecisionEngine)
+  : heuristicDecisionEngine;
 
 const fetchTodayAppointments = new FetchTodayAppointments(appointmentService, logger);
 const generateAppointmentRecommendations = new GenerateAppointmentRecommendations(
