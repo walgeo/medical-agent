@@ -291,11 +291,17 @@ export class MedicalAgentEventsService {
     return (await response.json()) as UiConfig;
   }
 
-  async synthesizeSpeech(text: string): Promise<ArrayBuffer> {
+  async synthesizeSpeech(text: string, timeoutMs = 15000): Promise<ArrayBuffer> {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+
     const response = await fetch(`${this.apiBaseUrl}/tts/synthesize`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ text }),
+      signal: controller.signal,
+    }).finally(() => {
+      clearTimeout(timeoutId);
     });
 
     if (!response.ok) {

@@ -43,6 +43,9 @@ export class VoiceCallQueueService {
   private audioUnlocked = false;
   private hasWarnedTtsFallback = false;
   private readonly debugLogging = false;
+  private readonly serverAudioCache = new Map<string, ArrayBuffer>();
+  private readonly serverAudioInFlight = new Map<string, Promise<ArrayBuffer | null>>();
+  private readonly maxServerAudioCacheEntries = 40;
   private voiceProbeAttempts = 0;
   private readonly maxVoiceProbeAttempts = 12;
 
@@ -202,6 +205,9 @@ export class VoiceCallQueueService {
     const current = this.queue$.getValue();
     this.queue$.next([...current, call]);
 
+    const messageSpanish = this.buildVoiceMessage(call);
+    this.prefetchServerAudio(messageSpanish);
+
     if (!this.isPlaying$.getValue()) {
       this.debug('[VoiceCallQueue] Iniciando procesamiento de cola');
       void this.processQueue();
@@ -301,7 +307,7 @@ export class VoiceCallQueueService {
 
   private async playServerGeneratedAudio(text: string): Promise<boolean> {
     try {
-      const audioBuffer = await this.eventsService.synthesizeSpeech(text);
+      const audioBuffer = await this.getServerAudioBuffer(text);
       if (!audioBuffer || audioBuffer.byteLength === 0) {
         return false;
       }
@@ -330,6 +336,67 @@ export class VoiceCallQueueService {
       });
     } catch {
       return false;
+    }
+  }
+
+  private normalizeSpeechCacheKey(text: string): string {
+    return text.trim().replace(/\s+/g, ' ').toLowerCase();
+  }
+
+  private prefetchServerAudio(text: string): void {
+    const key = this.normalizeSpeechCacheKey(text);
+    if (!key || this.serverAudioCache.has(key) || this.serverAudioInFlight.has(key)) {
+      return;
+    }
+
+    const request = this.eventsService
+      .synthesizeSpeech(text, 18000)
+      .then((buffer) => {
+        this.storeServerAudio(key, buffer);
+        return buffer;
+      })
+      .catch(() => null)
+      .finally(() => {
+        this.serverAudioInFlight.delete(key);
+      });
+
+    this.serverAudioInFlight.set(key, request);
+  }
+
+  private async getServerAudioBuffer(text: string): Promise<ArrayBuffer | null> {
+    const key = this.normalizeSpeechCacheKey(text);
+
+    const cached = this.serverAudioCache.get(key);
+    if (cached) {
+      return cached;
+    }
+
+    const inFlight = this.serverAudioInFlight.get(key);
+    if (inFlight) {
+      const result = await inFlight;
+      if (result && result.byteLength > 0) {
+        return result;
+      }
+    }
+
+    const generated = await this.eventsService.synthesizeSpeech(text, 18000);
+    this.storeServerAudio(key, generated);
+    return generated;
+  }
+
+  private storeServerAudio(key: string, audio: ArrayBuffer): void {
+    if (!key || !audio || audio.byteLength === 0) {
+      return;
+    }
+
+    this.serverAudioCache.set(key, audio);
+
+    while (this.serverAudioCache.size > this.maxServerAudioCacheEntries) {
+      const oldest = this.serverAudioCache.keys().next().value as string | undefined;
+      if (!oldest) {
+        break;
+      }
+      this.serverAudioCache.delete(oldest);
     }
   }
 
