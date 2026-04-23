@@ -2,7 +2,7 @@ import { createServer, IncomingMessage, Server, ServerResponse } from 'http';
 import { spawn, spawnSync } from 'child_process';
 import { tmpdir } from 'os';
 import { extname, join } from 'path';
-import { existsSync, readdirSync } from 'fs';
+import { existsSync, readdirSync, statSync } from 'fs';
 import { readFile, unlink, stat } from 'fs/promises';
 import { randomUUID } from 'crypto';
 import { AgentEvent } from '../../domain/events/AgentEvent';
@@ -2666,7 +2666,7 @@ export class SseEventPublisher implements IEventPublisher {
 
     for (const name of candidateNames) {
       const direct = join(piperDir, name);
-      if (existsSync(direct)) {
+      if (existsSync(direct) && statSync(direct).isFile()) {
         return direct;
       }
     }
