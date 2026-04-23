@@ -1,0 +1,39 @@
+# Dependencies
+node_modules/
+*.lock
+package-lock.json
+yarn.lock
+
+# Build outputs
+dist/
+build/
+*.tsbuildinfo
+
+# Angular
+.angular/
+angular-agent-demo/dist/
+angular-agent-demo/node_modules/
+
+# Environment
+.env
+.env.local
+.env.*.local
+
+# OS
+.DS_Store
+Thumbs.db
+*.log
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Misc
+*.tmp
+.cache/
+
+# Vendor binaries (TTS, etc.) - descargados en runtime
+vendor/

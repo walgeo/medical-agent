@@ -1,0 +1,431 @@
+<main class="container">
+  <header class="header">
+    <h1>Monitor de Eventos del Agente Medico</h1>
+    <p class="status" [class.status-ok]="status === 'conectado'" [class.status-warn]="status === 'reconectando'" [class.status-error]="status === 'desconectado'">
+      {{ statusLabel() }}
+    </p>
+
+    <div class="notifications-setup">
+      <p class="permission">Notificaciones del navegador: <strong>{{ notificationPermissionLabel() }}</strong></p>
+      <button class="enable-notifications" (click)="enableBrowserNotifications()">
+        Activar notificaciones
+      </button>
+    </div>
+    <p class="notification-status" *ngIf="notificationStatusMessage">
+      {{ notificationStatusMessage }}
+    </p>
+  </header>
+
+  <!-- ===== LLAMADAS DE VOZ ===== -->
+  <section class="voice-call-panel" *ngIf="currentVoiceCall || voiceQueue.length > 0" aria-label="Cola de llamadas por voz">
+    <div class="voice-call-header">
+      <span class="voice-icon">🔊</span>
+      <h3>Llamadas por Voz</h3>
+      <span class="voice-status" [class.is-playing]="isVoiceCallPlaying">
+        {{ getVoiceCallStatusLabel() }}
+      </span>
+    </div>
+
+    <div class="voice-call-current" *ngIf="currentVoiceCall">
+      <div class="voice-call-content">
+        <p class="voice-patient"><strong>{{ currentVoiceCall.patientName }}</strong></p>
+        <p class="voice-action">
+          {{ currentVoiceCall.action === 'vital_signs' ? ('🩹 ' + getVoiceCallAreaLabel(currentVoiceCall.specialty)) : '👨‍⚕️ Pasar con médico' }}
+        </p>
+        <p class="voice-specialty">{{ currentVoiceCall.specialty }}</p>
+      </div>
+      <div class="voice-spinner" *ngIf="isVoiceCallPlaying">
+        <span></span><span></span><span></span>
+      </div>
+    </div>
+
+    <div class="voice-queue-pending" *ngIf="voiceQueue.length > 0">
+      <p class="queue-title">Próximos en cola:</p>
+      <ul class="voice-queue-list">
+        <li *ngFor="let call of voiceQueue.slice(0, 3)">
+          <span class="queue-patient">{{ call.patientName }}</span>
+          <span class="queue-action">{{ call.action === 'vital_signs' ? ('🩹 ' + getVoiceCallAreaLabel(call.specialty)) : '👨‍⚕️ Médico' }}</span>
+        </li>
+      </ul>
+    </div>
+
+  </section>
+
+  <nav class="view-switch" role="navigation" aria-label="Cambiar vista">
+    <button class="view-btn" [class.active]="activeView === 'main'" (click)="setView('main')">
+      Vista Principal
+    </button>
+    <button class="view-btn" [class.active]="activeView === 'nurse'" (click)="setView('nurse')">
+      Enfermería
+    </button>
+    <button class="view-btn" [class.active]="activeView === 'lab'" (click)="setView('lab')">
+      Laboratorio
+    </button>
+    <button class="view-btn" [class.active]="activeView === 'studies'" (click)="setView('studies')">
+      Estudios especiales
+    </button>
+    <button class="view-btn" [class.active]="activeView === 'tracking'" (click)="setView('tracking')">
+      Seguimiento
+    </button>
+    <button class="view-btn chat-btn" [class.active]="activeView === 'chat'" (click)="setView('chat')">
+      💬 Chat Zoe
+    </button>
+  </nav>
+
+  <section class="overlay-stack" *ngIf="overlayAlerts.length > 0" aria-live="assertive" aria-atomic="true">
+    <article
+      class="overlay-card"
+      *ngFor="let alert of overlayAlerts"
+      [class.overlay-warning]="alert.level === 'warning'"
+      [class.overlay-info]="alert.level === 'info'"
+    >
+      <div class="overlay-top">
+        <h2>{{ alert.title }}</h2>
+        <button class="overlay-close" (click)="dismissOverlayAlert(alert.id)" aria-label="Cerrar alerta">×</button>
+      </div>
+      <p>{{ alert.message }}</p>
+    </article>
+  </section>
+
+  <section class="empty" *ngIf="activeView === 'main' && mainAlerts.length === 0">
+    Esperando alertas para toma de signos vitales y pase con el medico.
+  </section>
+
+  <section class="event-list" *ngIf="activeView === 'main' && mainAlerts.length > 0">
+    <article
+      class="card"
+      *ngFor="let e of mainAlerts"
+      [class.card-warning]="e.type === 'pre_appointment_alert'"
+      [class.card-info]="e.type === 'patient_call_to_doctor'"
+      [class.card-reco]="e.type === 'appointment_recommendation'"
+    >
+      <div class="card-top">
+        <h2>{{ humanType(e.type) }}</h2>
+        <span class="time">{{ formatDate(e.occurredAt) }}</span>
+      </div>
+
+      <p><strong>Paciente:</strong> {{ e.patientName }}</p>
+      <p><strong>Doctor:</strong> {{ doctorDisplayName(e.doctorName) }}</p>
+      <p><strong>Especialidad:</strong> {{ e.specialty }}</p>
+      <p><strong>Inicio:</strong> {{ formatDate(e.scheduledAt) }}</p>
+      <p><strong>Fin:</strong> {{ formatDate(e.endsAt) }}</p>
+      <p class="action">{{ e.actionText }}</p>
+
+      <div class="recommendation-meta" *ngIf="e.type === 'appointment_recommendation'">
+        <p><strong>Estado IA:</strong> {{ recommendationStatusLabel(e) }}</p>
+        <p><strong>Origen:</strong> {{ e.recommendation?.source === 'llm' ? 'LLM (Ollama)' : 'Fallback heuristico' }}</p>
+        <p><strong>{{ recommendationFeedbackLabel(e) }}</strong></p>
+        <div class="recommendation-actions">
+          <button
+            class="meta-btn confirm"
+            *ngIf="e.recommendation?.requiresHumanConfirmation && e.recommendation?.confirmationStatus !== 'confirmed'"
+            (click)="confirmRecommendation(e)"
+          >
+            Confirmar accion
+          </button>
+          <button
+            class="meta-btn"
+            [disabled]="!canSendFeedback(e, 'ignored')"
+            (click)="markRecommendationIgnored(e)"
+          >
+            Marcar ignorada
+          </button>
+          <button
+            class="meta-btn danger"
+            [disabled]="!canSendFeedback(e, 'false_alarm')"
+            (click)="markRecommendationFalseAlarm(e)"
+          >
+            Marcar falsa alarma
+          </button>
+        </div>
+      </div>
+    </article>
+  </section>
+
+  <section class="queue-panel nurse-panel" *ngIf="activeView === 'nurse'" aria-label="Enfermeria">
+    <h2>Enfermería — Cola de Signos Vitales</h2>
+
+    <p class="queue-empty" *ngIf="vitalSignsQueue.length === 0">No hay pacientes en cola de signos vitales en este momento.</p>
+
+    <div class="queue-list" *ngIf="vitalSignsQueue.length > 0">
+      <article class="queue-card"
+        *ngFor="let item of vitalSignsQueue; trackBy: trackByAppointmentId"
+        [class.nurse-card-early]="!hasPreAppointmentAlert(item.id)"
+        [class.nurse-card-alerted]="hasPreAppointmentAlert(item.id)"
+      >
+        <div class="nurse-card-top">
+          <h3>{{ item.patientName }}</h3>
+          <span class="badge-nurse badge-alerted" *ngIf="hasPreAppointmentAlert(item.id)">⚠ Alerta activa</span>
+          <span class="badge-nurse badge-early" *ngIf="!hasPreAppointmentAlert(item.id)">🕐 Llegada anticipada</span>
+        </div>
+        <p><strong>Especialidad:</strong> {{ item.specialty }}</p>
+        <p><strong>Hora cita:</strong> {{ formatDate(item.scheduledAt) }}</p>
+        <p><strong>Check-in:</strong> {{ item.checkedInAt ? formatDate(item.checkedInAt) : 'Pendiente' }}</p>
+
+        <div class="nurse-actions">
+          <button
+            class="btn-nurse-start"
+            *ngIf="!isPreparationStarted(item.id)"
+            (click)="handleLabOrStudiesCall(item.id)"
+          >
+            📣 Llamar paciente
+          </button>
+          <button
+            class="btn-nurse-start-secondary"
+            *ngIf="hasPreAppointmentAlert(item.id) && !isPreparationStarted(item.id)"
+            (click)="markPreparationStarted(item.id)"
+          >
+            ▶ Iniciar toma de signos vitales
+          </button>
+          <button
+            class="btn-nurse-done"
+            *ngIf="isPreparationStarted(item.id)"
+            (click)="handleLabOrStudiesComplete(item.id)"
+          >
+            ✓ Finalizar toma
+          </button>
+        </div>
+      </article>
+    </div>
+  </section>
+
+  <section class="queue-panel nurse-panel" *ngIf="activeView === 'lab'" aria-label="Laboratorio">
+    <h2>Laboratorio — Cola de Toma de Muestras</h2>
+
+    <p class="queue-empty" *ngIf="laboratoryQueue.length === 0">No hay pacientes en cola de laboratorio en este momento.</p>
+
+    <div class="queue-list" *ngIf="laboratoryQueue.length > 0">
+      <article class="queue-card"
+        *ngFor="let item of laboratoryQueue; trackBy: trackByAppointmentId"
+        [class.nurse-card-early]="!hasPreAppointmentAlert(item.id)"
+        [class.nurse-card-alerted]="hasPreAppointmentAlert(item.id)"
+      >
+        <div class="nurse-card-top">
+          <h3>{{ item.patientName }}</h3>
+          <span class="badge-nurse badge-alerted" *ngIf="hasPreAppointmentAlert(item.id)">⚠ Alerta activa</span>
+          <span class="badge-nurse badge-early" *ngIf="!hasPreAppointmentAlert(item.id)">🕐 Llegada anticipada</span>
+        </div>
+        <p><strong>Especialidad:</strong> {{ item.specialty }}</p>
+        <p><strong>Hora cita:</strong> {{ formatDate(item.scheduledAt) }}</p>
+        <p><strong>Check-in:</strong> {{ item.checkedInAt ? formatDate(item.checkedInAt) : 'Pendiente' }}</p>
+
+        <div class="nurse-actions">
+          <button
+            class="btn-nurse-start"
+            *ngIf="!isPreparationStarted(item.id)"
+            (click)="handleLabOrStudiesCall(item.id)"
+          >
+            📣 Llamar paciente
+          </button>
+          <button
+            class="btn-nurse-start-secondary"
+            *ngIf="hasPreAppointmentAlert(item.id) && !isPreparationStarted(item.id)"
+            (click)="markPreparationStarted(item.id)"
+          >
+            ▶ Iniciar toma de laboratorios
+          </button>
+          <button
+            class="btn-nurse-done"
+            *ngIf="isPreparationStarted(item.id)"
+            (click)="handleLabOrStudiesComplete(item.id)"
+          >
+            ✓ Finalizar toma
+          </button>
+        </div>
+      </article>
+    </div>
+  </section>
+
+  <section class="queue-panel nurse-panel" *ngIf="activeView === 'studies'" aria-label="Estudios especiales">
+    <h2>Estudios especiales — Cola de Toma de Estudios</h2>
+
+    <p class="queue-empty" *ngIf="specialStudiesQueue.length === 0">No hay pacientes en cola de estudios especiales en este momento.</p>
+
+    <div class="queue-list" *ngIf="specialStudiesQueue.length > 0">
+      <article class="queue-card"
+        *ngFor="let item of specialStudiesQueue; trackBy: trackByAppointmentId"
+        [class.nurse-card-early]="!hasPreAppointmentAlert(item.id)"
+        [class.nurse-card-alerted]="hasPreAppointmentAlert(item.id)"
+      >
+        <div class="nurse-card-top">
+          <h3>{{ item.patientName }}</h3>
+          <span class="badge-nurse badge-alerted" *ngIf="hasPreAppointmentAlert(item.id)">⚠ Alerta activa</span>
+          <span class="badge-nurse badge-early" *ngIf="!hasPreAppointmentAlert(item.id)">🕐 Llegada anticipada</span>
+        </div>
+        <p><strong>Especialidad:</strong> {{ item.specialty }}</p>
+        <p><strong>Hora cita:</strong> {{ formatDate(item.scheduledAt) }}</p>
+        <p><strong>Check-in:</strong> {{ item.checkedInAt ? formatDate(item.checkedInAt) : 'Pendiente' }}</p>
+
+        <div class="nurse-actions">
+          <button
+            class="btn-nurse-start"
+            *ngIf="!isPreparationStarted(item.id)"
+            (click)="handleLabOrStudiesCall(item.id)"
+          >
+            📣 Llamar paciente
+          </button>
+          <button
+            class="btn-nurse-start-secondary"
+            *ngIf="hasPreAppointmentAlert(item.id) && !isPreparationStarted(item.id)"
+            (click)="markPreparationStarted(item.id)"
+          >
+            ▶ Iniciar toma de estudios especiales
+          </button>
+          <button
+            class="btn-nurse-done"
+            *ngIf="isPreparationStarted(item.id)"
+            (click)="handleLabOrStudiesComplete(item.id)"
+          >
+            ✓ Finalizar toma
+          </button>
+        </div>
+      </article>
+    </div>
+  </section>
+
+  <section class="tracking-panel" *ngIf="activeView === 'tracking'" aria-label="Seguimiento de citas">
+    <h2>Tabla de Seguimiento de Citas</h2>
+
+    <!-- Búsqueda -->
+    <div class="tracking-toolbar">
+      <div class="tracking-search-wrap">
+        <span class="search-icon">🔍</span>
+        <input
+          class="tracking-search"
+          type="text"
+          placeholder="Buscar por paciente, doctor o especialidad..."
+          [(ngModel)]="trackingSearch"
+          (ngModelChange)="trackingPage = 1"
+          aria-label="Buscar citas"
+        />
+        <button *ngIf="trackingSearch" class="search-clear" (click)="trackingSearch = ''" aria-label="Limpiar búsqueda">✕</button>
+      </div>
+    </div>
+
+    <!-- Tabs por estado -->
+    <div class="appointment-tabs">
+      <button 
+        *ngFor="let status of uniqueAppointmentStatuses"
+        [class.active]="trackingActiveTab === status"
+        (click)="setTrackingTab(status)"
+        class="tab-button">
+        {{ status }} ({{ getTotalByStatus(status) }})
+      </button>
+    </div>
+
+    <div class="tracking-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th class="sortable" (click)="setTrackingSort('scheduledAt')">Cita <span class="sort-icon">{{ sortIcon('scheduledAt') }}</span></th>
+            <th class="sortable" (click)="setTrackingSort('patientName')">Paciente <span class="sort-icon">{{ sortIcon('patientName') }}</span></th>
+            <th>Estado</th>
+            <th class="sortable" (click)="setTrackingSort('specialty')">Especialidad <span class="sort-icon">{{ sortIcon('specialty') }}</span></th>
+            <th class="sortable" (click)="setTrackingSort('doctorName')">Doctor <span class="sort-icon">{{ sortIcon('doctorName') }}</span></th>
+            <th class="sortable" (click)="setTrackingSort('checkedInAt')">Check-in <span class="sort-icon">{{ sortIcon('checkedInAt') }}</span></th>
+            <th class="sortable" (click)="setTrackingSort('vitalSignsTakenAt')">Signos <span class="sort-icon">{{ sortIcon('vitalSignsTakenAt') }}</span></th>
+            <th>Reagendada</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr *ngFor="let a of getAppointmentsByStatus(trackingActiveTab)" [class]="rowStatusClass(trackingStatusLabel(a))">
+            <td>{{ formatDate(a.scheduledAt) }}</td>
+            <td>{{ a.patientName }}</td>
+            <td>{{ trackingStatusLabel(a) }}</td>
+            <td>{{ a.specialty || '-' }}</td>
+            <td>{{ doctorDisplayName(a.doctorName) }}</td>
+            <td>{{ a.checkedInAt ? formatDate(a.checkedInAt) : '-' }}</td>
+            <td>{{ a.vitalSignsTakenAt ? formatDate(a.vitalSignsTakenAt) : '-' }}</td>
+            <td>{{ a.rescheduledTo ? formatDate(a.rescheduledTo) : '-' }}</td>
+          </tr>
+          <tr *ngIf="getAppointmentsByStatus(trackingActiveTab).length === 0">
+            <td colspan="8" class="tracking-empty">No se encontraron citas{{ trackingSearch ? ' para "' + trackingSearch + '"' : '' }}.</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+
+    <!-- Paginación -->
+    <div class="tracking-pagination" *ngIf="trackingTotalPages > 1">
+      <button class="page-btn" [disabled]="trackingPage === 1" (click)="setTrackingPage(trackingPage - 1)">‹</button>
+      <ng-container *ngFor="let p of trackingPageRange">
+        <button
+          class="page-btn"
+          [class.page-active]="p === trackingPage"
+          (click)="setTrackingPage(p)">
+          {{ p }}
+        </button>
+      </ng-container>
+      <button class="page-btn" [disabled]="trackingPage === trackingTotalPages" (click)="setTrackingPage(trackingPage + 1)">›</button>
+      <span class="page-info">Página {{ trackingPage }} de {{ trackingTotalPages }} · {{ getTotalByStatus(trackingActiveTab) }} registros</span>
+    </div>
+  </section>
+
+  <!-- ===== NUEVA VISTA: CHAT ZOE ===== -->
+  <section class="chat-panel" *ngIf="activeView === 'chat'" aria-label="Chat Zoe">
+    <div class="chat-header">
+      <div class="chat-avatar">🤖</div>
+      <div>
+        <h2>Zoe</h2>
+        <p class="chat-subtitle">Asistente de gestión de citas médicas · <em>"vida"</em></p>
+      </div>
+    </div>
+
+    <div class="chat-messages" #chatContainer>
+      <div class="chat-welcome" *ngIf="chatMessages.length === 0">
+        <p>Hola, soy <strong>Zoe</strong>. Este chat ahora funciona en modo guiado.</p>
+        <p>Elige opciones predefinidas para obtener respuestas rápidas y consistentes.</p>
+      </div>
+
+      <div class="chat-message"
+        *ngFor="let msg of chatMessages; let i = index"
+        [class.msg-user]="msg.role === 'user'"
+        [class.msg-zoe]="msg.role === 'zoe'"
+      >
+        <!-- User Messages -->
+        <div *ngIf="msg.role === 'user'" class="msg-user-content">
+          <div class="msg-avatar">👤</div>
+          <div class="msg-body">
+            <p class="msg-text">{{ msg.content }}</p>
+            <span class="msg-time">{{ formatDate(msg.timestamp) }}</span>
+          </div>
+        </div>
+
+        <!-- Zoe Messages with Feedback Component -->
+        <div *ngIf="msg.role === 'zoe'" class="msg-zoe-content">
+          <app-zoe-response-with-feedback
+            [userQuery]="getLastUserMessage(i)"
+            [zoeResponse]="msg.content"
+            [confidence]="msg.confidence ?? 0.75"
+            [confidenceReasons]="getConfidenceReasons(msg)"
+            [route]="msg.route ?? 'fallback'"
+            [isHtml]="msg.isHtml"
+            (feedbackSubmitted)="submitZoeFeedback(getLastUserMessage(i), msg.content, $event.feedback, $event.correction)"
+          >
+          </app-zoe-response-with-feedback>
+          <span class="msg-time">{{ formatDate(msg.timestamp) }}</span>
+        </div>
+      </div>
+
+      <div class="chat-loading" *ngIf="isChatLoading">
+        <div class="msg-avatar">🤖</div>
+        <div class="chat-dots"><span></span><span></span><span></span></div>
+      </div>
+    </div>
+
+    <div class="chat-guided-row">
+      <p class="chat-guided-title">{{ chatMenuPrompt }}</p>
+      <div class="chat-options-grid">
+        <button
+          *ngFor="let option of chatOptions"
+          class="chat-option-btn"
+          (click)="selectChatOption(option)"
+          [disabled]="isChatLoading"
+        >
+          {{ option.label }}
+        </button>
+      </div>
+    </div>
+  </section>
+
+</main>

@@ -1,0 +1,26 @@
+{
+  "name": "medical-appointment-agent",
+  "version": "1.0.0",
+  "description": "Agente de IA para gestión de consultas médicas",
+  "main": "dist/main.js",
+  "scripts": {
+    "build": "npm run setup:tts-bundled && tsc",
+    "start": "npm run setup:tts-bundled && node dist/main.js",
+    "dev": "npm run setup:tts-bundled && ts-node src/main.ts",
+    "setup:tts-bundled": "node scripts/setup-bundled-tts.js",
+    "generate:vapid": "web-push generate-vapid-keys"
+  },
+  "dependencies": {
+    "node-cron": "^3.0.3",
+    "node-notifier": "^10.0.1",
+    "web-push": "^3.6.7"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "@types/node-cron": "^3.0.11",
+    "@types/node-notifier": "^8.0.5",
+    "@types/web-push": "^3.6.4",
+    "ts-node": "^10.9.2",
+    "typescript": "^5.4.5"
+  }
+}
