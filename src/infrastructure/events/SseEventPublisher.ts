@@ -1,7 +1,7 @@
 import { createServer, IncomingMessage, Server, ServerResponse } from 'http';
-import { spawn, spawnSync } from 'child_process';
+import { ChildProcessWithoutNullStreams, spawn, spawnSync } from 'child_process';
 import { tmpdir } from 'os';
-import { extname, join } from 'path';
+import { basename, extname, join } from 'path';
 import { existsSync, readdirSync, statSync } from 'fs';
 import { readFile, unlink, stat } from 'fs/promises';
 import { randomUUID } from 'crypto';
@@ -59,6 +59,20 @@ type DetectedTtsCommand = {
   viaHost: boolean;
 };
 
+type PendingPiperRequest = {
+  outputFileName: string;
+  resolve: () => void;
+  reject: (error: Error) => void;
+  timeout: NodeJS.Timeout;
+};
+
+type PersistentPiperSession = {
+  key: string;
+  child: ChildProcessWithoutNullStreams;
+  pending: PendingPiperRequest[];
+  stdoutBuffer: string;
+};
+
 export class SseEventPublisher implements IEventPublisher {
   private readonly clients = new Set<ServerResponse>();
   private readonly eventHistory: AgentEvent[] = [];
@@ -71,6 +85,8 @@ export class SseEventPublisher implements IEventPublisher {
   private pushEnabled = false;
   private detectedTtsCommand: DetectedTtsCommand | null | undefined;
   private readonly learningEngine: ZoeLearningEngine = new ZoeLearningEngine();
+  private piperSession: PersistentPiperSession | null = null;
+  private readonly persistentPiperEnabled = (process.env.TTS_PIPER_PERSISTENT ?? 'true').toLowerCase() !== 'false';
 
   constructor(
     private readonly port: number,
@@ -2591,7 +2607,6 @@ export class SseEventPublisher implements IEventPublisher {
       throw new Error('TTS_PIPER_MODEL no configurado para usar piper.');
     }
 
-    const tempFile = join(tmpdir(), `medical-agent-piper-${randomUUID()}.wav`);
     const lengthScaleRaw = process.env.TTS_PIPER_LENGTH_SCALE ?? '1.0';
     const noiseScaleRaw = process.env.TTS_PIPER_NOISE_SCALE ?? '0.5';
     const noiseWRaw = process.env.TTS_PIPER_NOISE_W ?? '0.8';
@@ -2599,6 +2614,19 @@ export class SseEventPublisher implements IEventPublisher {
     const lengthScale = Number(lengthScaleRaw);
     const noiseScale = Number(noiseScaleRaw);
     const noiseW = Number(noiseWRaw);
+
+    if (this.persistentPiperEnabled && !viaHost) {
+      try {
+        return await this.generatePiperWavWithPersistentProcess(text, piperExecutable, modelPath, lengthScale, noiseScale, noiseW);
+      } catch (error) {
+        this.logger.log(
+          'TTS_PIPER_PERSISTENT_FALLBACK',
+          `Fallo modo persistente, usando ejecucion unica. ${error instanceof Error ? error.message : 'Error desconocido'}`,
+        );
+      }
+    }
+
+    const tempFile = join(tmpdir(), `medical-agent-piper-${randomUUID()}.wav`);
 
     const args = [
       '--model', modelPath,
@@ -2617,6 +2645,198 @@ export class SseEventPublisher implements IEventPublisher {
         // Ignorar errores de limpieza.
       });
     }
+  }
+
+  private async generatePiperWavWithPersistentProcess(
+    text: string,
+    piperExecutable: string,
+    modelPath: string,
+    lengthScale: number,
+    noiseScale: number,
+    noiseW: number,
+  ): Promise<Buffer> {
+    const timeoutMs = this.readPositiveIntEnv('TTS_PIPER_REQUEST_TIMEOUT_MS', 30000);
+    const session = this.ensurePersistentPiperSession(piperExecutable, modelPath, lengthScale, noiseScale, noiseW);
+    const outputFileName = `medical-agent-piper-${randomUUID()}.wav`;
+    const tempFile = join(tmpdir(), outputFileName);
+
+    await new Promise<void>((resolve, reject) => {
+      if (!session.child.stdin.writable) {
+        reject(new Error('Pipe stdin de Piper no disponible.'));
+        return;
+      }
+
+      const pending: PendingPiperRequest = {
+        outputFileName,
+        resolve: () => {
+          clearTimeout(pending.timeout);
+          resolve();
+        },
+        reject: (error: Error) => {
+          clearTimeout(pending.timeout);
+          reject(error);
+        },
+        timeout: setTimeout(() => {
+          const index = session.pending.indexOf(pending);
+          if (index >= 0) {
+            session.pending.splice(index, 1);
+          }
+          reject(new Error(`Tiempo de espera agotado para audio ${outputFileName}.`));
+        }, timeoutMs),
+      };
+
+      session.pending.push(pending);
+
+      const payload = JSON.stringify({ text, output_file: outputFileName });
+      session.child.stdin.write(`${payload}\n`, (error) => {
+        if (!error) {
+          return;
+        }
+
+        const index = session.pending.indexOf(pending);
+        if (index >= 0) {
+          session.pending.splice(index, 1);
+        }
+        clearTimeout(pending.timeout);
+        reject(error);
+      });
+    });
+
+    await this.waitForFile(tempFile, timeoutMs);
+
+    try {
+      return await readFile(tempFile);
+    } finally {
+      void unlink(tempFile).catch(() => {
+        // Ignorar errores de limpieza.
+      });
+    }
+  }
+
+  private ensurePersistentPiperSession(
+    piperExecutable: string,
+    modelPath: string,
+    lengthScale: number,
+    noiseScale: number,
+    noiseW: number,
+  ): PersistentPiperSession {
+    const lengthArg = Number.isFinite(lengthScale) ? String(lengthScale) : '1.0';
+    const noiseArg = Number.isFinite(noiseScale) ? String(noiseScale) : '0.5';
+    const noiseWArg = Number.isFinite(noiseW) ? String(noiseW) : '0.8';
+    const key = [piperExecutable, modelPath, lengthArg, noiseArg, noiseWArg].join('|');
+
+    if (this.piperSession && this.piperSession.key === key) {
+      return this.piperSession;
+    }
+
+    this.stopPersistentPiperSession();
+
+    const args = [
+      '--model', modelPath,
+      '--output_dir', tmpdir(),
+      '--json-input',
+      '--length_scale', lengthArg,
+      '--noise_scale', noiseArg,
+      '--noise_w', noiseWArg,
+    ];
+
+    const child = spawn(piperExecutable, args, { stdio: ['pipe', 'pipe', 'pipe'] });
+    const session: PersistentPiperSession = {
+      key,
+      child,
+      pending: [],
+      stdoutBuffer: '',
+    };
+
+    child.stdout.on('data', (chunk: Buffer) => {
+      this.processPersistentPiperStdout(session, chunk.toString('utf8'));
+    });
+
+    child.on('error', (error) => {
+      this.handlePersistentPiperExit(session, `Error en proceso persistente Piper: ${error.message}`);
+    });
+
+    child.on('close', (code) => {
+      this.handlePersistentPiperExit(session, `Proceso persistente Piper finalizo con codigo ${code ?? 'null'}.`);
+    });
+
+    this.piperSession = session;
+    this.logger.log('TTS_PIPER_PERSISTENT_READY', 'Proceso Piper persistente inicializado.');
+    return session;
+  }
+
+  private processPersistentPiperStdout(session: PersistentPiperSession, chunk: string): void {
+    session.stdoutBuffer += chunk;
+    const lines = session.stdoutBuffer.split('\n');
+    session.stdoutBuffer = lines.pop() ?? '';
+
+    for (const rawLine of lines) {
+      const line = rawLine.trim();
+      if (!line || !line.endsWith('.wav')) {
+        continue;
+      }
+
+      const next = session.pending.shift();
+      if (!next) {
+        continue;
+      }
+
+      next.resolve();
+    }
+  }
+
+  private handlePersistentPiperExit(session: PersistentPiperSession, message: string): void {
+    if (this.piperSession !== session) {
+      return;
+    }
+
+    this.piperSession = null;
+    for (const pending of session.pending.splice(0)) {
+      pending.reject(new Error(message));
+    }
+  }
+
+  private stopPersistentPiperSession(): void {
+    const current = this.piperSession;
+    if (!current) {
+      return;
+    }
+
+    this.piperSession = null;
+    for (const pending of current.pending.splice(0)) {
+      pending.reject(new Error('Proceso Piper reiniciado.'));
+    }
+
+    try {
+      current.child.kill('SIGTERM');
+    } catch {
+      // Ignorar errores al terminar el proceso.
+    }
+  }
+
+  private async waitForFile(filePath: string, timeoutMs: number): Promise<void> {
+    const started = Date.now();
+
+    while (Date.now() - started < timeoutMs) {
+      try {
+        const stats = await stat(filePath);
+        if (stats.isFile() && stats.size > 44) {
+          return;
+        }
+      } catch {
+        // El archivo aun no esta disponible.
+      }
+
+      await this.delay(40);
+    }
+
+    throw new Error(`No se genero el archivo de audio esperado: ${basename(filePath)}`);
+  }
+
+  private async delay(ms: number): Promise<void> {
+    await new Promise<void>((resolve) => {
+      setTimeout(resolve, ms);
+    });
   }
 
   private async runCommand(command: string, args: string[], viaHost: boolean): Promise<void> {
