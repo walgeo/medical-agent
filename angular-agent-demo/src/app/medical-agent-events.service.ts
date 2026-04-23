@@ -85,6 +85,8 @@ export interface UiConfig {
   mainAlertWindowMs: number;
   overlayWarningTtlMs: number;
   overlayInfoTtlMs: number;
+  preferBrowserTts: boolean;
+  serverTtsEnabled: boolean;
 }
 
 @Injectable({ providedIn: 'root' })

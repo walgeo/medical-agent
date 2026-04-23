@@ -46,6 +46,8 @@ export class VoiceCallQueueService {
   private readonly serverAudioCache = new Map<string, ArrayBuffer>();
   private readonly serverAudioInFlight = new Map<string, Promise<ArrayBuffer | null>>();
   private readonly maxServerAudioCacheEntries = 40;
+  private preferBrowserTts = false;
+  private serverTtsEnabled = true;
   private voiceProbeAttempts = 0;
   private readonly maxVoiceProbeAttempts = 12;
 
@@ -136,6 +138,11 @@ export class VoiceCallQueueService {
     this.updateDiagnostics({
       audioUnlocked: true,
     });
+  }
+
+  configureTtsMode(preferBrowserTts: boolean, serverTtsEnabled: boolean): void {
+    this.preferBrowserTts = preferBrowserTts;
+    this.serverTtsEnabled = serverTtsEnabled;
   }
 
   private scheduleVoiceProbe(): void {
@@ -276,30 +283,72 @@ export class VoiceCallQueueService {
     }
 
     return new Promise((resolve) => {
-      void this.playServerGeneratedAudio(text)
-        .then((playedOnServerAudio) => {
-          if (playedOnServerAudio) {
-            this.hasWarnedTtsFallback = false;
-            this.updateDiagnostics({
-              lastSynthesisError: null,
-              lastFallbackReason: null,
-            });
-            resolve();
-            return;
-          }
-
-          this.updateDiagnostics({
-            lastFallbackReason: 'server_audio_no_reproducido',
-          });
-          void this.playFallbackAlert(text).finally(() => resolve());
-        })
-        .catch(() => {
-          this.updateDiagnostics({
-            lastFallbackReason: 'server_audio_error',
-          });
-          void this.playFallbackAlert(text).finally(() => resolve());
-        });
+      void this.playPreferredAudio(text).finally(() => resolve());
     });
+  }
+
+  private async playPreferredAudio(text: string): Promise<void> {
+    if (this.preferBrowserTts) {
+      const playedInBrowser = await this.playBrowserTtsWithResult(text);
+      if (playedInBrowser) {
+        this.hasWarnedTtsFallback = false;
+        this.updateDiagnostics({
+          lastSynthesisError: null,
+          lastFallbackReason: null,
+        });
+        return;
+      }
+
+      if (!this.serverTtsEnabled) {
+        this.updateDiagnostics({
+          lastFallbackReason: 'browser_tts_unavailable',
+        });
+        await this.playFallbackAlert(text);
+        return;
+      }
+    }
+
+    if (this.serverTtsEnabled) {
+      try {
+        const playedOnServerAudio = await this.playServerGeneratedAudio(text);
+        if (playedOnServerAudio) {
+          this.hasWarnedTtsFallback = false;
+          this.updateDiagnostics({
+            lastSynthesisError: null,
+            lastFallbackReason: null,
+          });
+          return;
+        }
+
+        this.updateDiagnostics({
+          lastFallbackReason: 'server_audio_no_reproducido',
+        });
+      } catch {
+        this.updateDiagnostics({
+          lastFallbackReason: 'server_audio_error',
+        });
+      }
+    }
+
+    const playedInBrowser = await this.playBrowserTtsWithResult(text);
+    if (playedInBrowser) {
+      return;
+    }
+
+    await this.playFallbackAlert(text);
+  }
+
+  private async playBrowserTtsWithResult(text: string): Promise<boolean> {
+    if (!this.synth) {
+      return false;
+    }
+
+    try {
+      await this.playBrowserTts(text);
+      return true;
+    } catch {
+      return false;
+    }
   }
 
   private async playServerGeneratedAudio(text: string): Promise<boolean> {

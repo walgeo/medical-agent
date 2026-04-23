@@ -431,11 +431,15 @@ export class SseEventPublisher implements IEventPublisher {
     const mainAlertWindowMs = this.readPositiveIntEnv('MAIN_ALERT_WINDOW_MS', 15 * 60_000);
     const overlayWarningTtlMs = this.readPositiveIntEnv('OVERLAY_WARNING_TTL_MS', 25_000);
     const overlayInfoTtlMs = this.readPositiveIntEnv('OVERLAY_INFO_TTL_MS', 12_000);
+    const preferBrowserTts = this.readBooleanEnv('PREFER_BROWSER_TTS', false);
+    const serverTtsEnabled = this.readBooleanEnv('SERVER_TTS_ENABLED', true);
 
     this.sendJson(res, 200, {
       mainAlertWindowMs,
       overlayWarningTtlMs,
       overlayInfoTtlMs,
+      preferBrowserTts,
+      serverTtsEnabled,
     });
   }
 
@@ -2358,6 +2362,23 @@ export class SseEventPublisher implements IEventPublisher {
     return Math.round(parsed);
   }
 
+  private readBooleanEnv(name: string, fallback: boolean): boolean {
+    const raw = process.env[name];
+    if (!raw) return fallback;
+
+    const normalized = raw.trim().toLowerCase();
+    if (['1', 'true', 'yes', 'on'].includes(normalized)) {
+      return true;
+    }
+
+    if (['0', 'false', 'no', 'off'].includes(normalized)) {
+      return false;
+    }
+
+    this.logger.log('UI_CONFIG_INVALID', `Valor invalido para ${name}=${raw}. Usando ${fallback}.`);
+    return fallback;
+  }
+
   private parseSubscription(body: unknown): StoredPushSubscription {
     if (!body || typeof body !== 'object') {
       throw new Error('El cuerpo debe ser un objeto JSON.');
@@ -2412,6 +2433,11 @@ export class SseEventPublisher implements IEventPublisher {
 
   private async handleSynthesizeSpeech(req: IncomingMessage, res: ServerResponse): Promise<void> {
     try {
+      if (!this.readBooleanEnv('SERVER_TTS_ENABLED', true)) {
+        this.sendJson(res, 503, { message: 'TTS de servidor deshabilitado.' });
+        return;
+      }
+
       const body = (await this.readJsonBody(req)) as { text?: unknown };
       const text = typeof body.text === 'string' ? body.text.trim() : '';
 

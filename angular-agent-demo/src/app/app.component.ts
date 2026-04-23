@@ -72,6 +72,8 @@ export class AppComponent implements OnInit, OnDestroy {
     mainAlertWindowMs: 15 * 60_000,
     overlayWarningTtlMs: 25_000,
     overlayInfoTtlMs: 12_000,
+    preferBrowserTts: false,
+    serverTtsEnabled: true,
   };
 
   // Chat Zoe
@@ -1253,6 +1255,10 @@ export class AppComponent implements OnInit, OnDestroy {
   private async refreshUiConfig(): Promise<void> {
     try {
       this.uiConfig = await this.eventsService.getUiConfig();
+      this.voiceCallQueue.configureTtsMode(
+        this.uiConfig.preferBrowserTts,
+        this.uiConfig.serverTtsEnabled,
+      );
     } catch {
       // Si no hay config remota, mantener valores por defecto.
     }
