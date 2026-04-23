@@ -1,5 +1,5 @@
-app = 'medical-agent'
-primary_region = 'mia'
+app = 'medical-agent-walgeo'
+primary_region = 'dfw'
 
 [build]
   dockerfile = 'Dockerfile'
@@ -15,7 +15,7 @@ primary_region = 'mia'
     grace_period = '10s'
     interval = '30s'
     method = 'GET'
-    path = '/'
+    path = '/ui/config'
     timeout = '5s'
 
 [[vm]]

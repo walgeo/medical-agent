@@ -1,7 +1,7 @@
 import { createServer, IncomingMessage, Server, ServerResponse } from 'http';
 import { spawn, spawnSync } from 'child_process';
 import { tmpdir } from 'os';
-import { join } from 'path';
+import { extname, join } from 'path';
 import { existsSync, readdirSync } from 'fs';
 import { readFile, unlink, stat } from 'fs/promises';
 import { randomUUID } from 'crypto';
@@ -188,7 +188,7 @@ export class SseEventPublisher implements IEventPublisher {
       }
 
       // Serve Angular static files
-      const staticDir = join(__dirname, '..', 'public');
+      const staticDir = process.env.STATIC_DIR ?? join(process.cwd(), 'public');
       void this.serveStaticFile(req, res, staticDir);
     });
 
@@ -2783,7 +2783,6 @@ export class SseEventPublisher implements IEventPublisher {
       '.woff': 'font/woff',
       '.ttf': 'font/ttf',
     };
-    const { extname } = await import('path');
     const urlPath = new URL(req.url ?? '/', `http://localhost`).pathname;
     let filePath = join(staticDir, urlPath === '/' ? 'index.html' : urlPath);
 
