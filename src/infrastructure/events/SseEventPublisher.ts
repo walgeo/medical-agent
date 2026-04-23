@@ -2652,7 +2652,7 @@ export class SseEventPublisher implements IEventPublisher {
     const outputFileName = `medical-agent-piper-${randomUUID()}.wav`;
     const tempFile = join(tmpdir(), outputFileName);
 
-    const payload = JSON.stringify({ text, output_file: outputFileName });
+    const payload = JSON.stringify({ text, output_file: tempFile });
     await this.enqueuePersistentPiperWrite(session, payload, timeoutMs);
 
     await this.waitForFile(tempFile, timeoutMs);
