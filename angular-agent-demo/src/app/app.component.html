@@ -14,6 +14,14 @@
     <p class="notification-status" *ngIf="notificationStatusMessage">
       {{ notificationStatusMessage }}
     </p>
+
+    <div class="voice-test-controls">
+      <p class="voice-test-label">Pruebas de voz:</p>
+      <button class="voice-test-btn" (click)="triggerVoiceBurst(5)">Probar 5 llamadas</button>
+      <button class="voice-test-btn" (click)="triggerVoiceBurst(10)">Probar 10 llamadas</button>
+    </div>
+    <p class="voice-test-status" *ngIf="voiceTestStatusMessage">{{ voiceTestStatusMessage }}</p>
+
   </header>
 
   <!-- ===== LLAMADAS DE VOZ ===== -->

@@ -55,6 +55,40 @@
 	color: #334155;
 }
 
+.voice-test-controls {
+	margin-top: 10px;
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	flex-wrap: wrap;
+}
+
+.voice-test-label {
+	margin: 0;
+	font-size: 0.9rem;
+	color: #334155;
+}
+
+.voice-test-btn {
+	padding: 7px 12px;
+	border: 1px solid #0c4a6e;
+	background: #e0f2fe;
+	color: #082f49;
+	font-weight: 700;
+	border-radius: 10px;
+	cursor: pointer;
+}
+
+.voice-test-btn:hover {
+	background: #bae6fd;
+}
+
+.voice-test-status {
+	margin: 8px 0 0;
+	font-size: 0.9rem;
+	color: #0f172a;
+}
+
 .enable-notifications {
 	padding: 8px 14px;
 	border: 2px solid #0f766e;

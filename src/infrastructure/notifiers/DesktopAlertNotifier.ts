@@ -32,6 +32,7 @@ export class DesktopAlertNotifier implements IAlertNotifier {
   notifyAppointmentStarted(appointment: MedicalAppointment): void {
     const range = this.formatRange(appointment.scheduledAt, appointment.endsAt);
     const doctor = this.doctorDisplayName(appointment.doctorName);
+    const directService = this.isDirectServiceSpecialty(appointment.specialty);
     this.showDialog({
       severity: 'info',
       title: 'CITA INICIADA',
@@ -40,8 +41,8 @@ export class DesktopAlertNotifier implements IAlertNotifier {
         `Doctor: ${doctor}\n` +
         `Especialidad: ${appointment.specialty}\n` +
         `Horario de cita: ${range}\n\n` +
-        `Estado actualizado: Iniciada.\n` +
-        `Accion: continuar con la atencion medica.`,
+        `Estado actualizado: ${directService ? 'Completada' : 'Iniciada'}.\n` +
+        `Accion: ${directService ? 'servicio finalizado en el area de toma.' : 'continuar con la atencion medica.'}`,
     });
   }
 
@@ -74,5 +75,10 @@ export class DesktopAlertNotifier implements IAlertNotifier {
   private doctorDisplayName(doctorName: string): string {
     const normalized = doctorName.trim();
     return normalized ? `Dr. ${normalized}` : 'No asignado';
+  }
+
+  private isDirectServiceSpecialty(specialty: string): boolean {
+    const normalized = specialty.trim().toLowerCase();
+    return normalized === 'toma de laboratorios' || normalized === 'toma de estudios especiales';
   }
 }

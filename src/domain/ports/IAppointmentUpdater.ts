@@ -9,4 +9,5 @@ export interface IAppointmentUpdater {
   markAsRescheduled(appointmentId: string, rescheduledTo: Date): Promise<void>;
   markAsCancelled(appointmentId: string): Promise<void>;
   markAsStarted(appointmentId: string): Promise<void>;
+  markAsCompleted(appointmentId: string): Promise<void>;
 }

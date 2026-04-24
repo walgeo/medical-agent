@@ -267,6 +267,21 @@ export class MedicalAgentEventsService {
     }
   }
 
+  async triggerVoiceBurst(count: number): Promise<void> {
+    const response = await fetch(`${this.apiBaseUrl}/debug/voice-burst`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-staff-role': 'nurse',
+      },
+      body: JSON.stringify({ count }),
+    });
+
+    if (!response.ok) {
+      throw new Error(`No se pudo generar rafaga de voz de prueba. status=${response.status}`);
+    }
+  }
+
   async sendChatMessage(
     message: string,
     history: Array<{ role: string; content: string }>,
@@ -294,16 +309,21 @@ export class MedicalAgentEventsService {
   }
 
   async synthesizeSpeech(text: string, timeoutMs = 15000): Promise<ArrayBuffer> {
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+    const useTimeout = Number.isFinite(timeoutMs) && timeoutMs > 0;
+    const controller = useTimeout ? new AbortController() : null;
+    const timeoutId = useTimeout
+      ? setTimeout(() => controller?.abort(new DOMException('tts_timeout', 'AbortError')), timeoutMs)
+      : null;
 
     const response = await fetch(`${this.apiBaseUrl}/tts/synthesize`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ text }),
-      signal: controller.signal,
+      signal: controller?.signal,
     }).finally(() => {
-      clearTimeout(timeoutId);
+      if (timeoutId !== null) {
+        clearTimeout(timeoutId);
+      }
     });
 
     if (!response.ok) {

@@ -235,6 +235,13 @@ export class MockAppointmentStore {
     appointment.status = AppointmentStatus.Started;
   }
 
+  markAsCompleted(appointmentId: string): void {
+    const appointment = this.findById(appointmentId);
+    if (!appointment) return;
+
+    appointment.status = AppointmentStatus.Completed;
+  }
+
   markAsRescheduled(appointmentId: string, rescheduledTo: Date): void {
     const appointment = this.findById(appointmentId);
     if (!appointment) return;

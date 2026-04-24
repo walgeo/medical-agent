@@ -5,6 +5,11 @@ import { IAlertNotifier } from '../../domain/ports/IAlertNotifier';
 import { IEventPublisher } from '../../domain/ports/IEventPublisher';
 import { ILogger } from '../../domain/ports/ILogger';
 
+function isDirectServiceSpecialty(specialty: string): boolean {
+  const normalized = specialty.trim().toLowerCase();
+  return normalized === 'toma de laboratorios' || normalized === 'toma de estudios especiales';
+}
+
 export class StartAppointment {
   constructor(
     private readonly appointmentUpdater: IAppointmentUpdater,
@@ -23,6 +28,7 @@ export class StartAppointment {
 
     const hasAssignedDoctor = appointment.doctorName.trim().length > 0;
     const doctorLabel = hasAssignedDoctor ? `Dr. ${appointment.doctorName}` : 'personal de servicio';
+    const directService = isDirectServiceSpecialty(appointment.specialty);
 
     this.eventPublisher.publish({
       version: 1,
@@ -37,20 +43,20 @@ export class StartAppointment {
       actionText: `Preparación completada para ${appointment.patientName}. Iniciando atención con ${doctorLabel}.`,
     });
 
-    this.eventPublisher.publish({
-      version: 1,
-      type: 'patient_call_to_doctor',
-      occurredAt: now.toISOString(),
-      appointmentId: appointment.id,
-      patientName: appointment.patientName,
-      doctorName: appointment.doctorName,
-      specialty: appointment.specialty,
-      scheduledAt: appointment.scheduledAt.toISOString(),
-      endsAt: appointment.endsAt.toISOString(),
-      actionText: hasAssignedDoctor
-        ? 'Paciente, por favor pasar con el medico para iniciar la consulta.'
-        : `Paciente, por favor pasar a ${appointment.specialty} para iniciar el servicio.`,
-    });
+    if (hasAssignedDoctor) {
+      this.eventPublisher.publish({
+        version: 1,
+        type: 'patient_call_to_doctor',
+        occurredAt: now.toISOString(),
+        appointmentId: appointment.id,
+        patientName: appointment.patientName,
+        doctorName: appointment.doctorName,
+        specialty: appointment.specialty,
+        scheduledAt: appointment.scheduledAt.toISOString(),
+        endsAt: appointment.endsAt.toISOString(),
+        actionText: 'Paciente, por favor pasar con el medico para iniciar la consulta.',
+      });
+    }
 
     await this.appointmentUpdater.markAsStarted(appointment.id);
     alreadyStarted.add(appointment.id);
@@ -67,8 +73,19 @@ export class StartAppointment {
       specialty: appointment.specialty,
       scheduledAt: appointment.scheduledAt.toISOString(),
       endsAt: appointment.endsAt.toISOString(),
-      actionText: 'La cita llego a su hora de inicio y fue marcada como Iniciada.',
+      actionText: directService
+        ? 'La toma de servicio inicio y se completo en la misma atencion.'
+        : 'La cita llego a su hora de inicio y fue marcada como Iniciada.',
     });
+
+    if (directService) {
+      await this.appointmentUpdater.markAsCompleted(appointment.id);
+      this.logger.log(
+        'APPOINTMENT_COMPLETED',
+        `Servicio de ${appointment.specialty} para ${appointment.patientName} completado sin consulta medica.`,
+      );
+      return;
+    }
 
     this.logger.log(
       'APPOINTMENT_STARTED',

@@ -60,6 +60,7 @@ export class AppComponent implements OnInit, OnDestroy {
   trackedAppointments: TrackedAppointment[] = [];
   notificationPermission: NotificationPermission | 'unsupported' = 'default';
   notificationStatusMessage = '';
+  voiceTestStatusMessage = '';
   recommendationFeedbackByAppointment: Record<string, 'accepted' | 'ignored' | 'false_alarm'> = {};
   trackingActiveTab: string = 'Confirmada';
   appointmentStatuses: string[] = [];
@@ -115,6 +116,7 @@ export class AppComponent implements OnInit, OnDestroy {
   private alertAudioUnlocked = false;
   private readonly unlockAlertAudio = () => {
     this.alertAudioUnlocked = true;
+    this.voiceCallQueue.registerUserGesture();
 
     if (this.alertAudioContext && this.alertAudioContext.state === 'suspended') {
       void this.alertAudioContext.resume().catch(() => {
@@ -331,6 +333,18 @@ export class AppComponent implements OnInit, OnDestroy {
     await this.eventsService.triggerEarlyVitalSigns(appointmentId);
   }
 
+  async triggerVoiceBurst(count: number): Promise<void> {
+    this.voiceCallQueue.registerUserGesture();
+    this.voiceTestStatusMessage = `Generando ${count} llamadas de prueba...`;
+
+    try {
+      await this.eventsService.triggerVoiceBurst(count);
+      this.voiceTestStatusMessage = `Listo: se enviaron ${count} llamadas de prueba.`;
+    } catch {
+      this.voiceTestStatusMessage = 'No se pudo generar la rafaga de prueba.';
+    }
+  }
+
   ngOnInit(): void {
     this.resetDailyUiState();
     this.refreshNotificationPermission();
@@ -382,6 +396,7 @@ export class AppComponent implements OnInit, OnDestroy {
       })
       .subscribe((event) => {
         if (!this.isCurrentDay(event.scheduledAt)) return;
+        if (this.shouldIgnoreIncomingEvent(event)) return;
 
         if (this.isDuplicateDoctorCallEvent(event)) return;
 
@@ -393,6 +408,10 @@ export class AppComponent implements OnInit, OnDestroy {
         this.triggerBrowserNotification(event);
         this.playAlertSound(event);
       });
+  }
+
+  private shouldIgnoreIncomingEvent(event: AgentEvent): boolean {
+    return event.type === 'patient_call_to_doctor' && !this.hasAssignedDoctor(event.doctorName);
   }
 
   ngOnDestroy(): void {
@@ -661,6 +680,8 @@ export class AppComponent implements OnInit, OnDestroy {
         'vital_signs',
       );
     } else if (event.type === 'patient_call_to_doctor') {
+      if (!this.hasAssignedDoctor(event.doctorName)) return;
+
       if (this.hasAssignedDoctor(event.doctorName)) {
         this.doctorCallAnnouncedByAppointment.add(event.appointmentId);
       }
@@ -1038,31 +1059,41 @@ export class AppComponent implements OnInit, OnDestroy {
   }
 
   private async enableWebPushSubscription(): Promise<void> {
-    if (!('serviceWorker' in navigator)) {
-      return;
+    try {
+      if (!('serviceWorker' in navigator)) {
+        return;
+      }
+
+      const pushConfig = await this.eventsService.getPushPublicKey();
+      if (!pushConfig.enabled || !pushConfig.publicKey) {
+        return;
+      }
+
+      const registration = await navigator.serviceWorker.register('/assets/sw-push.js');
+      const existingSubscription = await registration.pushManager.getSubscription();
+
+      if (existingSubscription) {
+        this.pushSubscription = existingSubscription;
+        await this.eventsService.registerPushSubscription(existingSubscription);
+        return;
+      }
+
+      const subscription = await registration.pushManager.subscribe({
+        userVisibleOnly: true,
+        applicationServerKey: this.base64UrlToUint8Array(pushConfig.publicKey),
+      });
+
+      this.pushSubscription = subscription;
+      await this.eventsService.registerPushSubscription(subscription);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (message.toLowerCase().includes('registration failed - push service error')) {
+        this.notificationStatusMessage =
+          'Notificaciones del navegador no disponibles en este entorno. El sistema sigue funcionando sin Web Push.';
+        return;
+      }
+      throw error;
     }
-
-    const pushConfig = await this.eventsService.getPushPublicKey();
-    if (!pushConfig.enabled || !pushConfig.publicKey) {
-      return;
-    }
-
-    const registration = await navigator.serviceWorker.register('/assets/sw-push.js');
-    const existingSubscription = await registration.pushManager.getSubscription();
-
-    if (existingSubscription) {
-      this.pushSubscription = existingSubscription;
-      await this.eventsService.registerPushSubscription(existingSubscription);
-      return;
-    }
-
-    const subscription = await registration.pushManager.subscribe({
-      userVisibleOnly: true,
-      applicationServerKey: this.base64UrlToUint8Array(pushConfig.publicKey),
-    });
-
-    this.pushSubscription = subscription;
-    await this.eventsService.registerPushSubscription(subscription);
   }
 
   private base64UrlToUint8Array(base64Url: string): Uint8Array {
@@ -1254,7 +1285,13 @@ export class AppComponent implements OnInit, OnDestroy {
 
   private async refreshUiConfig(): Promise<void> {
     try {
-      this.uiConfig = await this.eventsService.getUiConfig();
+      const remoteConfig = await this.eventsService.getUiConfig();
+      this.uiConfig = {
+        ...this.uiConfig,
+        ...remoteConfig,
+        preferBrowserTts: remoteConfig.preferBrowserTts === true,
+        serverTtsEnabled: remoteConfig.serverTtsEnabled !== false,
+      };
       this.voiceCallQueue.configureTtsMode(
         this.uiConfig.preferBrowserTts,
         this.uiConfig.serverTtsEnabled,

@@ -6,6 +6,11 @@ import { ILogger } from '../../domain/ports/ILogger';
 
 const VITAL_SIGNS_WINDOW_MINUTES = 10;
 
+function isDirectServiceSpecialty(specialty: string): boolean {
+  const normalized = specialty.trim().toLowerCase();
+  return normalized === 'toma de laboratorios' || normalized === 'toma de estudios especiales';
+}
+
 export class ProcessVitalSignsQueue {
   constructor(
     private readonly appointmentUpdater: IAppointmentUpdater,
@@ -29,7 +34,9 @@ export class ProcessVitalSignsQueue {
       specialty: appointment.specialty,
       scheduledAt: appointment.scheduledAt.toISOString(),
       endsAt: appointment.endsAt.toISOString(),
-      actionText: 'Signos vitales completados. Paciente listo para pasar con el medico.',
+      actionText: isDirectServiceSpecialty(appointment.specialty)
+        ? `Preparacion completada. Paciente listo para iniciar ${appointment.specialty}.`
+        : 'Signos vitales completados. Paciente listo para pasar con el medico.',
     });
 
     this.logger.log(

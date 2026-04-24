@@ -41,6 +41,12 @@ export class MockAppointmentUpdater implements IAppointmentUpdater {
     console.log(`[MOCK API] PATCH /appointments/${appointmentId} → { status: "Iniciada" } ✓`);
   }
 
+  async markAsCompleted(appointmentId: string): Promise<void> {
+    await this.delay(120);
+    this.store.markAsCompleted(appointmentId);
+    console.log(`[MOCK API] PATCH /appointments/${appointmentId} → { status: "Completada" } ✓`);
+  }
+
   async markAsRescheduled(appointmentId: string, rescheduledTo: Date): Promise<void> {
     await this.delay(120);
     this.store.markAsRescheduled(appointmentId, rescheduledTo);

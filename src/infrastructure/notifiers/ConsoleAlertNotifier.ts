@@ -22,6 +22,7 @@ export class ConsoleAlertNotifier implements IAlertNotifier {
   notifyAppointmentStarted(appointment: MedicalAppointment): void {
     const range = this.formatRange(appointment.scheduledAt, appointment.endsAt);
     const doctor = this.doctorDisplayName(appointment.doctorName);
+    const directService = this.isDirectServiceSpecialty(appointment.specialty);
 
     console.log('\n✅ CITA INICIADA');
     console.log(SEPARATOR);
@@ -29,7 +30,11 @@ export class ConsoleAlertNotifier implements IAlertNotifier {
     console.log(`  Médico    : ${doctor}`);
     console.log(`  Esp.      : ${appointment.specialty}`);
     console.log(`  Horario   : ${range}`);
-    console.log('  Estado actualizado → Iniciada');
+    console.log(
+      directService
+        ? '  Estado actualizado → Completada'
+        : '  Estado actualizado → Iniciada',
+    );
     console.log(`${SEPARATOR}\n`);
   }
 
@@ -48,5 +53,10 @@ export class ConsoleAlertNotifier implements IAlertNotifier {
   private doctorDisplayName(doctorName: string): string {
     const normalized = doctorName.trim();
     return normalized ? `Dr. ${normalized}` : 'No asignado';
+  }
+
+  private isDirectServiceSpecialty(specialty: string): boolean {
+    const normalized = specialty.trim().toLowerCase();
+    return normalized === 'toma de laboratorios' || normalized === 'toma de estudios especiales';
   }
 }

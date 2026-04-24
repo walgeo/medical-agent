@@ -1,5 +1,5 @@
 import { createServer, IncomingMessage, Server, ServerResponse } from 'http';
-import { ChildProcessWithoutNullStreams, spawn, spawnSync } from 'child_process';
+import { ChildProcess, spawn, spawnSync } from 'child_process';
 import { tmpdir } from 'os';
 import { basename, extname, join } from 'path';
 import { existsSync, readdirSync, statSync } from 'fs';
@@ -61,7 +61,7 @@ type DetectedTtsCommand = {
 
 type PersistentPiperSession = {
   key: string;
-  child: ChildProcessWithoutNullStreams;
+  child: ChildProcess;
 };
 
 export class SseEventPublisher implements IEventPublisher {
@@ -78,7 +78,8 @@ export class SseEventPublisher implements IEventPublisher {
   private readonly learningEngine: ZoeLearningEngine = new ZoeLearningEngine();
   private piperSession: PersistentPiperSession | null = null;
   private piperWriteChain: Promise<void> = Promise.resolve();
-  private readonly persistentPiperEnabled = (process.env.TTS_PIPER_PERSISTENT ?? 'true').toLowerCase() !== 'false';
+  private readonly persistentPiperEnabled = (process.env.TTS_PIPER_PERSISTENT ?? 'false').toLowerCase() !== 'false';
+  private ttsSynthesisChain: Promise<void> = Promise.resolve();
 
   constructor(
     private readonly port: number,
@@ -166,6 +167,11 @@ export class SseEventPublisher implements IEventPublisher {
 
       if (requestUrl.pathname === '/appointments/trigger-early-vital-signs' && req.method === 'POST') {
         void this.handleTriggerEarlyVitalSigns(req, res);
+        return;
+      }
+
+      if (requestUrl.pathname === '/debug/voice-burst' && req.method === 'POST') {
+        void this.handleDebugVoiceBurst(req, res);
         return;
       }
 
@@ -554,6 +560,84 @@ export class SseEventPublisher implements IEventPublisher {
     } catch (error) {
       this.sendJson(res, 400, {
         message: 'No se pudo iniciar la toma de signos vitales.',
+        error: error instanceof Error ? error.message : 'Error desconocido',
+      });
+    }
+  }
+
+  private async handleDebugVoiceBurst(
+    req: IncomingMessage,
+    res: ServerResponse,
+  ): Promise<void> {
+    if (!this.isNurseRequest(req)) {
+      this.sendJson(res, 403, {
+        message: 'Operacion permitida solo para enfermeria.',
+      });
+      return;
+    }
+
+    try {
+      const body = (await this.readJsonBody(req)) as { count?: unknown };
+      const parsed = typeof body.count === 'number' ? body.count : Number(body.count);
+      const count = Number.isFinite(parsed)
+        ? Math.max(1, Math.min(25, Math.trunc(parsed)))
+        : 5;
+
+      const now = new Date();
+      const startsAt = new Date(now.getTime() - 60_000).toISOString();
+      const endsAt = new Date(now.getTime() + 25 * 60_000).toISOString();
+
+      const samplePatients = [
+        'Ana Lopez',
+        'Carlos Mendez',
+        'Sofia Ramirez',
+        'Diego Vargas',
+        'Lucia Solis',
+        'Jose Cordero',
+        'Mariana Castro',
+        'Paula Rojas',
+      ];
+      const sampleDoctors = [
+        'Dra. Morales',
+        'Dr. Herrera',
+        'Dra. Salazar',
+        'Dr. Chaves',
+      ];
+      const sampleSpecialties = [
+        'Medicina general',
+        'Cardiologia',
+        'Pediatria',
+        'Toma de laboratorios',
+      ];
+
+      for (let i = 0; i < count; i += 1) {
+        const patientName = samplePatients[i % samplePatients.length] as string;
+        const doctorName = sampleDoctors[i % sampleDoctors.length] as string;
+        const specialty = sampleSpecialties[i % sampleSpecialties.length] as string;
+        const eventType = i % 2 === 0 ? 'pre_appointment_alert' : 'patient_call_to_doctor';
+
+        this.publish({
+          version: 1,
+          type: eventType,
+          occurredAt: new Date(Date.now() + i * 150).toISOString(),
+          appointmentId: `debug-${Date.now()}-${i + 1}`,
+          patientName,
+          doctorName,
+          specialty,
+          scheduledAt: startsAt,
+          endsAt,
+          actionText:
+            eventType === 'pre_appointment_alert'
+              ? `Prueba de audio: llamar a ${patientName} para ${this.getPreparationArea(specialty)}.`
+              : `Prueba de audio: ${doctorName}, favor recibir a ${patientName}.`,
+        });
+      }
+
+      this.logger.log('VOICE_BURST_DEBUG_TRIGGERED', `count=${count}`);
+      this.sendJson(res, 200, { success: true, count });
+    } catch (error) {
+      this.sendJson(res, 400, {
+        message: 'No se pudo generar la rafaga de voz de prueba.',
         error: error instanceof Error ? error.message : 'Error desconocido',
       });
     }
@@ -2447,7 +2531,7 @@ export class SseEventPublisher implements IEventPublisher {
       }
 
       const normalizedText = text.slice(0, 260);
-      const audio = await this.generateSpeechWav(normalizedText);
+      const audio = await this.enqueueTtsSynthesis(normalizedText);
 
       res.statusCode = 200;
       res.setHeader('Content-Type', 'audio/wav');
@@ -2463,6 +2547,16 @@ export class SseEventPublisher implements IEventPublisher {
         error: error instanceof Error ? error.message : 'Error desconocido',
       });
     }
+  }
+
+  private async enqueueTtsSynthesis(text: string): Promise<Buffer> {
+    const operation = this.ttsSynthesisChain.then(() => this.generateSpeechWav(text));
+
+    this.ttsSynthesisChain = operation
+      .then(() => undefined)
+      .catch(() => undefined);
+
+    return await operation;
   }
 
   private async generateSpeechWav(text: string): Promise<Buffer> {
@@ -2638,30 +2732,54 @@ export class SseEventPublisher implements IEventPublisher {
         return await this.generatePiperWavWithPersistentProcess(text, piperExecutable, modelPath, lengthScale, noiseScale, noiseW);
       } catch (error) {
         this.logger.log(
-          'TTS_PIPER_PERSISTENT_FALLBACK',
-          `Fallo modo persistente, usando ejecucion unica. ${error instanceof Error ? error.message : 'Error desconocido'}`,
+          'TTS_PIPER_PERSISTENT_RETRY',
+          `Fallo modo persistente. Reiniciando sesion y reintentando una vez. ${error instanceof Error ? error.message : 'Error desconocido'}`,
         );
+
+        this.stopPersistentPiperSession();
+
+        try {
+          return await this.generatePiperWavWithPersistentProcess(text, piperExecutable, modelPath, lengthScale, noiseScale, noiseW);
+        } catch (retryError) {
+          this.logger.log(
+            'TTS_PIPER_PERSISTENT_FALLBACK',
+            `Fallo modo persistente tras reintento, usando ejecucion unica. ${retryError instanceof Error ? retryError.message : 'Error desconocido'}`,
+          );
+        }
+
       }
     }
 
-    const tempFile = join(tmpdir(), `medical-agent-piper-${randomUUID()}.wav`);
+    const runOnce = async (): Promise<Buffer> => {
+      const tempFile = join(tmpdir(), `medical-agent-piper-${randomUUID()}.wav`);
+      const args = [
+        '--model', modelPath,
+        '--output_file', tempFile,
+        '--length_scale', Number.isFinite(lengthScale) ? String(lengthScale) : '1.0',
+        '--noise_scale', Number.isFinite(noiseScale) ? String(noiseScale) : '0.5',
+        '--noise_w', Number.isFinite(noiseW) ? String(noiseW) : '0.8',
+      ];
 
-    const args = [
-      '--model', modelPath,
-      '--output_file', tempFile,
-      '--length_scale', Number.isFinite(lengthScale) ? String(lengthScale) : '1.0',
-      '--noise_scale', Number.isFinite(noiseScale) ? String(noiseScale) : '0.5',
-      '--noise_w', Number.isFinite(noiseW) ? String(noiseW) : '0.8',
-    ];
+      await this.runCommandWithInput(piperExecutable, args, text, viaHost);
 
-    await this.runCommandWithInput(piperExecutable, args, text, viaHost);
+      try {
+        return await readFile(tempFile);
+      } finally {
+        void unlink(tempFile).catch(() => {
+          // Ignorar errores de limpieza.
+        });
+      }
+    };
 
     try {
-      return await readFile(tempFile);
-    } finally {
-      void unlink(tempFile).catch(() => {
-        // Ignorar errores de limpieza.
-      });
+      return await runOnce();
+    } catch (error) {
+      await this.delay(120);
+      this.logger.log(
+        'TTS_RETRY',
+        `Reintentando sintesis Piper por fallo transitorio: ${error instanceof Error ? error.message : 'Error desconocido'}`,
+      );
+      return await runOnce();
     }
   }
 
@@ -2673,10 +2791,9 @@ export class SseEventPublisher implements IEventPublisher {
     noiseScale: number,
     noiseW: number,
   ): Promise<Buffer> {
-    const timeoutMs = this.readPositiveIntEnv('TTS_PIPER_REQUEST_TIMEOUT_MS', 30000);
+    const timeoutMs = this.readPositiveIntEnv('TTS_PIPER_REQUEST_TIMEOUT_MS', 120000);
     const session = this.ensurePersistentPiperSession(piperExecutable, modelPath, lengthScale, noiseScale, noiseW);
-    const outputFileName = `medical-agent-piper-${randomUUID()}.wav`;
-    const tempFile = join(tmpdir(), outputFileName);
+    const tempFile = join(tmpdir(), `medical-agent-piper-${randomUUID()}.wav`);
 
     const payload = JSON.stringify({ text, output_file: tempFile });
     await this.enqueuePersistentPiperWrite(session, payload, timeoutMs);
@@ -2712,14 +2829,13 @@ export class SseEventPublisher implements IEventPublisher {
 
     const args = [
       '--model', modelPath,
-      '--output_dir', tmpdir(),
       '--json-input',
       '--length_scale', lengthArg,
       '--noise_scale', noiseArg,
       '--noise_w', noiseWArg,
     ];
 
-    const child = spawn(piperExecutable, args, { stdio: ['pipe', 'pipe', 'pipe'] });
+    const child = spawn(piperExecutable, args, { stdio: ['pipe', 'ignore', 'ignore'] });
     const session: PersistentPiperSession = {
       key,
       child,
@@ -2741,7 +2857,8 @@ export class SseEventPublisher implements IEventPublisher {
   private async enqueuePersistentPiperWrite(session: PersistentPiperSession, payload: string, timeoutMs: number): Promise<void> {
     const writeOperation = this.piperWriteChain.then(async () => {
       await new Promise<void>((resolve, reject) => {
-        if (!session.child.stdin.writable) {
+        const stdin = session.child.stdin;
+        if (!stdin || !stdin.writable) {
           reject(new Error('Pipe stdin de Piper no disponible.'));
           return;
         }
@@ -2750,7 +2867,7 @@ export class SseEventPublisher implements IEventPublisher {
           reject(new Error('Timeout escribiendo request a Piper persistente.'));
         }, timeoutMs);
 
-        session.child.stdin.write(`${payload}\n`, (error) => {
+        stdin.write(`${payload}\n`, (error) => {
           clearTimeout(timeoutId);
           if (error) {
             reject(error);

@@ -21,13 +21,75 @@ export interface VoiceDiagnostics {
   lastSynthesisError: string | null;
 }
 
+export interface VoiceOption {
+  name: string;
+  lang: string;
+  localService: boolean;
+  default: boolean;
+}
+
 @Injectable({
   providedIn: 'root',
 })
 export class VoiceCallQueueService {
+  private static readonly PREFERRED_VOICE_STORAGE_KEY = 'preferredVoiceName';
+  private static readonly DEFAULT_PREFERRED_VOICE_NAME = 'Microsoft Sabina - Spanish (Mexico)';
+  private static readonly SPANISH_FEMALE_HINTS = [
+    'female',
+    'mujer',
+    'woman',
+    'femenina',
+    'femenino',
+    'paulina',
+    'paloma',
+    'helena',
+    'sabina',
+    'sofia',
+    'isabela',
+    'luciana',
+    'monica',
+    'maria',
+    'elvira',
+    'dalia',
+  ];
+  private static readonly SPANISH_MALE_HINTS = [
+    'male',
+    'hombre',
+    'man',
+    'masculina',
+    'masculino',
+    'jorge',
+    'juan',
+    'diego',
+    'carlos',
+    'alvaro',
+    'alberto',
+  ];
+  private static readonly HIGH_QUALITY_HINTS = [
+    'neural',
+    'wavenet',
+    'natural',
+    'premium',
+    'enhanced',
+    'online',
+    'cloud',
+  ];
+  private static readonly PIPER_LIKE_NAME_HINTS = [
+    'microsoft helena online',
+    'microsoft sabina online',
+    'microsoft dalia online',
+    'microsoft elvira online',
+    'google español de estados unidos',
+    'google español',
+    'paulina',
+    'monica',
+    'paloma',
+  ];
+
   private readonly queue$ = new BehaviorSubject<VoiceCall[]>([]);
   private readonly currentCall$ = new BehaviorSubject<VoiceCall | null>(null);
   private readonly isPlaying$ = new BehaviorSubject<boolean>(false);
+  private readonly availableVoices$ = new BehaviorSubject<VoiceOption[]>([]);
   private readonly diagnostics$ = new BehaviorSubject<VoiceDiagnostics>({
     voicesDetected: 0,
     selectedVoice: 'default',
@@ -50,6 +112,9 @@ export class VoiceCallQueueService {
   private serverTtsEnabled = true;
   private voiceProbeAttempts = 0;
   private readonly maxVoiceProbeAttempts = 12;
+  private hasTriggeredVoiceWarmup = false;
+  private pendingAudioUnlockResolvers: Array<() => void> = [];
+  private playbackAudioContext: AudioContext | null = null;
 
   constructor(private readonly eventsService: MedicalAgentEventsService) {
     if (typeof window !== 'undefined' && 'speechSynthesis' in window) {
@@ -61,11 +126,14 @@ export class VoiceCallQueueService {
         if (this.synth) {
           const voices = this.synth.getVoices();
           this.debug(`[VoiceCallQueue] Voces disponibles: ${voices.length}`);
-          
-          // Intentar encontrar voz local de español para evitar synthesis-failed por voz remota/incompatible
-          this.preferredVoice = voices.find((v) => v.lang.toLowerCase().startsWith('es') && v.localService)
-            || voices.find((v) => v.lang.toLowerCase().startsWith('es'))
-            || null;
+
+          if (voices.length === 0) {
+            this.ensureVoicesLoaded();
+          }
+
+          this.availableVoices$.next(this.toSelectableVoiceOptions(voices));
+
+          this.preferredVoice = this.pickPreferredSpanishVoice(voices);
           if (this.preferredVoice) {
             this.debug(`[VoiceCallQueue] Voz seleccionada: ${this.preferredVoice.name} (${this.preferredVoice.lang})`);
             this.updateDiagnostics({
@@ -73,7 +141,9 @@ export class VoiceCallQueueService {
               selectedVoice: `${this.preferredVoice.name} (${this.preferredVoice.lang})`,
             });
           } else {
-            console.warn('[VoiceCallQueue] No se encontró voz en español, se usará voz por defecto del navegador.');
+            if (this.preferBrowserTts || !this.serverTtsEnabled) {
+              console.warn('[VoiceCallQueue] No se encontró voz en español, se usará voz por defecto del navegador.');
+            }
             this.updateDiagnostics({
               voicesDetected: voices.length,
               selectedVoice: 'default',
@@ -110,11 +180,7 @@ export class VoiceCallQueueService {
     
     const enableAudio = () => {
       this.debug('[VoiceCallQueue] Interacción del usuario detectada - Audio desbloqueado');
-      this.audioUnlocked = true;
-      this.hasWarnedTtsFallback = false;
-      this.updateDiagnostics({
-        audioUnlocked: true,
-      });
+      this.markAudioUnlocked();
       
       // Intentar reanudar AudioContext si existe
       const audioContext = (window as any).AudioContext || (window as any).webkitAudioContext;
@@ -126,23 +192,43 @@ export class VoiceCallQueueService {
       
       document.removeEventListener('click', enableAudio);
       document.removeEventListener('keydown', enableAudio);
+      document.removeEventListener('pointerdown', enableAudio);
+      document.removeEventListener('touchstart', enableAudio);
     };
 
     document.addEventListener('click', enableAudio);
     document.addEventListener('keydown', enableAudio);
+    document.addEventListener('pointerdown', enableAudio);
+    document.addEventListener('touchstart', enableAudio);
   }
 
   registerUserGesture(): void {
+    this.markAudioUnlocked();
+  }
+
+  private markAudioUnlocked(): void {
     this.audioUnlocked = true;
     this.hasWarnedTtsFallback = false;
     this.updateDiagnostics({
       audioUnlocked: true,
     });
+
+    if (this.playbackAudioContext && this.playbackAudioContext.state === 'suspended') {
+      void this.playbackAudioContext.resume().catch(() => {
+        // Si falla el resume, se reintentará en la siguiente reproducción.
+      });
+    }
+
+    const resolvers = [...this.pendingAudioUnlockResolvers];
+    this.pendingAudioUnlockResolvers = [];
+    for (const resolve of resolvers) {
+      resolve();
+    }
   }
 
   configureTtsMode(preferBrowserTts: boolean, serverTtsEnabled: boolean): void {
-    this.preferBrowserTts = preferBrowserTts;
-    this.serverTtsEnabled = serverTtsEnabled;
+    this.preferBrowserTts = preferBrowserTts === true;
+    this.serverTtsEnabled = serverTtsEnabled !== false;
   }
 
   private scheduleVoiceProbe(): void {
@@ -159,9 +245,13 @@ export class VoiceCallQueueService {
         return;
       }
 
+      this.ensureVoicesLoaded();
+
       this.voiceProbeAttempts += 1;
       if (this.voiceProbeAttempts >= this.maxVoiceProbeAttempts) {
-        console.warn('[VoiceCallQueue] No se detectaron voces tras varios intentos. Revisa voces del sistema/navegador.');
+        if (this.preferBrowserTts || !this.serverTtsEnabled) {
+          console.warn('[VoiceCallQueue] No se detectaron voces tras varios intentos. Revisa voces del sistema/navegador.');
+        }
         return;
       }
 
@@ -169,6 +259,27 @@ export class VoiceCallQueueService {
     };
 
     setTimeout(probe, 700);
+  }
+
+  private ensureVoicesLoaded(): void {
+    if (!this.synth || this.hasTriggeredVoiceWarmup) {
+      return;
+    }
+
+    this.hasTriggeredVoiceWarmup = true;
+
+    try {
+      const warmup = new SpeechSynthesisUtterance(' ');
+      warmup.lang = 'es-ES';
+      warmup.volume = 0;
+      this.synth.speak(warmup);
+
+      setTimeout(() => {
+        this.synth?.cancel();
+      }, 120);
+    } catch {
+      // Si el navegador bloquea el warmup, mantenemos el flujo normal de reintentos.
+    }
   }
 
   get queue(): Observable<VoiceCall[]> {
@@ -187,11 +298,213 @@ export class VoiceCallQueueService {
     return this.diagnostics$.asObservable();
   }
 
+  get availableVoices(): Observable<VoiceOption[]> {
+    return this.availableVoices$.asObservable();
+  }
+
+  refreshVoiceOptions(): void {
+    if (!this.synth) return;
+
+    const voices = this.synth.getVoices();
+    this.availableVoices$.next(this.toSelectableVoiceOptions(voices));
+  }
+
+  private toSelectableVoiceOptions(voices: SpeechSynthesisVoice[]): VoiceOption[] {
+    const spanishVoices = voices.filter((voice) => this.isSpanishVoice(voice));
+    const preferredVendorVoices = spanishVoices.filter((voice) => this.isPreferredBrowserVendorVoice(voice));
+    const femaleVoices = spanishVoices.filter((voice) => this.isSpanishFemaleVoice(voice));
+    const selectableVoices = preferredVendorVoices.length > 0
+      ? preferredVendorVoices
+      : femaleVoices.length > 0
+        ? femaleVoices
+        : spanishVoices.filter((voice) => !this.isSpanishMaleVoice(voice));
+
+    const fallbackVoices = selectableVoices.length > 0
+      ? selectableVoices
+      : spanishVoices.length > 0
+        ? spanishVoices
+        : voices;
+
+    return fallbackVoices
+      .map((voice) => ({
+        name: voice.name,
+        lang: voice.lang,
+        localService: voice.localService,
+        default: voice.default,
+      }))
+      .sort((a, b) => a.name.localeCompare(b.name, 'es', { sensitivity: 'base' }));
+  }
+
+  private isSpanishVoice(voice: SpeechSynthesisVoice): boolean {
+    return voice.lang.toLowerCase().startsWith('es');
+  }
+
+  private isSpanishFemaleVoice(voice: SpeechSynthesisVoice): boolean {
+    const normalizedName = voice.name.toLowerCase();
+
+    if (!this.isSpanishVoice(voice)) {
+      return false;
+    }
+
+    if (this.isSpanishMaleVoice(voice)) {
+      return false;
+    }
+
+    return VoiceCallQueueService.SPANISH_FEMALE_HINTS.some((hint) => normalizedName.includes(hint));
+  }
+
+  private isSpanishMaleVoice(voice: SpeechSynthesisVoice): boolean {
+    const normalizedName = voice.name.toLowerCase();
+    return VoiceCallQueueService.SPANISH_MALE_HINTS.some((hint) => normalizedName.includes(hint));
+  }
+
+  private isPreferredBrowserVendorVoice(voice: SpeechSynthesisVoice): boolean {
+    const normalizedName = voice.name.toLowerCase();
+
+    if (!this.isSpanishVoice(voice)) {
+      return false;
+    }
+
+    return normalizedName.includes('google') || normalizedName.includes('microsoft');
+  }
+
+  setPreferredVoiceName(voiceName: string): void {
+    const normalized = voiceName.trim();
+
+    if (typeof window !== 'undefined') {
+      try {
+        if (normalized) {
+          window.localStorage.setItem(VoiceCallQueueService.PREFERRED_VOICE_STORAGE_KEY, normalized);
+        } else {
+          window.localStorage.removeItem(VoiceCallQueueService.PREFERRED_VOICE_STORAGE_KEY);
+        }
+      } catch {
+        // Si localStorage falla, mantener selección en memoria.
+      }
+    }
+
+    if (!this.synth) return;
+
+    const voices = this.synth.getVoices();
+    this.preferredVoice = this.pickPreferredSpanishVoice(voices);
+    this.updateDiagnostics({
+      selectedVoice: this.preferredVoice
+        ? `${this.preferredVoice.name} (${this.preferredVoice.lang})`
+        : 'default',
+    });
+  }
+
   private updateDiagnostics(patch: Partial<VoiceDiagnostics>): void {
     this.diagnostics$.next({
       ...this.diagnostics$.getValue(),
       ...patch,
     });
+  }
+
+  private pickPreferredSpanishVoice(voices: SpeechSynthesisVoice[]): SpeechSynthesisVoice | null {
+    if (voices.length === 0) {
+      return null;
+    }
+
+    const userPreferredName = this.readPreferredVoiceName();
+    if (userPreferredName) {
+      const matchedByName = voices.find(
+        (voice) => voice.name.toLowerCase().includes(userPreferredName.toLowerCase()),
+      );
+      if (matchedByName) {
+        return matchedByName;
+      }
+    }
+
+    const spanishVoices = voices.filter((voice) => voice.lang.toLowerCase().startsWith('es'));
+    if (spanishVoices.length === 0) {
+      return null;
+    }
+
+    const browserLang = (typeof navigator !== 'undefined' ? navigator.language : 'es-ES').toLowerCase();
+    const scored = spanishVoices
+      .map((voice) => ({
+        voice,
+        score: this.scoreSpanishVoice(voice, browserLang),
+      }))
+      .sort((a, b) => b.score - a.score);
+
+    return scored[0]?.voice ?? null;
+  }
+
+  private scoreSpanishVoice(voice: SpeechSynthesisVoice, browserLang: string): number {
+    const normalizedName = voice.name.toLowerCase();
+    const normalizedLang = voice.lang.toLowerCase();
+    let score = 0;
+
+    if (normalizedLang === browserLang) {
+      score += 200;
+    }
+
+    const browserPrefix = browserLang.split('-')[0];
+    if (normalizedLang.startsWith(browserPrefix)) {
+      score += 120;
+    }
+
+    if (voice.localService) {
+      score += 40;
+    }
+
+    if (voice.default) {
+      score += 30;
+    }
+
+    if (VoiceCallQueueService.PIPER_LIKE_NAME_HINTS.some((hint) => normalizedName.includes(hint))) {
+      score += 180;
+    }
+
+    if (VoiceCallQueueService.SPANISH_FEMALE_HINTS.some((hint) => normalizedName.includes(hint))) {
+      score += 90;
+    }
+
+    if (VoiceCallQueueService.SPANISH_MALE_HINTS.some((hint) => normalizedName.includes(hint))) {
+      score -= 70;
+    }
+
+    if (VoiceCallQueueService.HIGH_QUALITY_HINTS.some((hint) => normalizedName.includes(hint))) {
+      score += 80;
+    }
+
+    return score;
+  }
+
+  private pickPreferredVoiceForLang(voices: SpeechSynthesisVoice[], lang: string): SpeechSynthesisVoice | null {
+    const normalizedLang = lang.toLowerCase();
+    const languagePrefix = normalizedLang.split('-')[0];
+
+    if (languagePrefix === 'es') {
+      return this.pickPreferredSpanishVoice(voices);
+    }
+
+    const localMatch = voices.find(
+      (voice) => voice.lang.toLowerCase().startsWith(languagePrefix) && voice.localService,
+    );
+    if (localMatch) {
+      return localMatch;
+    }
+
+    return voices.find((voice) => voice.lang.toLowerCase().startsWith(languagePrefix)) ?? null;
+  }
+
+  private readPreferredVoiceName(): string {
+    if (typeof window === 'undefined') {
+      return VoiceCallQueueService.DEFAULT_PREFERRED_VOICE_NAME;
+    }
+
+    try {
+      const stored = window.localStorage
+        .getItem(VoiceCallQueueService.PREFERRED_VOICE_STORAGE_KEY)
+        ?.trim() ?? '';
+
+      return stored || VoiceCallQueueService.DEFAULT_PREFERRED_VOICE_NAME;
+    } catch {
+      return VoiceCallQueueService.DEFAULT_PREFERRED_VOICE_NAME;
+    }
   }
 
   addCall(appointmentId: string, patientName: string, specialty: string, action: 'vital_signs' | 'doctor_call'): void {
@@ -210,7 +523,9 @@ export class VoiceCallQueueService {
     this.queue$.next([...current, call]);
 
     const messageSpanish = this.buildVoiceMessage(call);
-    this.prefetchServerAudio(messageSpanish);
+    if (this.serverTtsEnabled) {
+      this.prefetchServerAudio(messageSpanish);
+    }
 
     if (!this.isPlaying$.getValue()) {
       this.debug('[VoiceCallQueue] Iniciando procesamiento de cola');
@@ -274,7 +589,7 @@ export class VoiceCallQueueService {
   private playAudio(text: string): Promise<void> {
     if (!this.audioUnlocked) {
       if (!this.hasWarnedTtsFallback) {
-        console.warn('[VoiceCallQueue] Audio no desbloqueado por interacción de usuario. Se intentará audio de servidor y, si falla, fallback.');
+        console.warn('[VoiceCallQueue] Audio no desbloqueado por interacción de usuario. La cola esperará el primer gesto antes de reproducir.');
         this.hasWarnedTtsFallback = true;
       }
       this.updateDiagnostics({
@@ -283,8 +598,44 @@ export class VoiceCallQueueService {
     }
 
     return new Promise((resolve) => {
-      void this.playPreferredAudio(text).finally(() => resolve());
+      void this.waitForAudioUnlockIfNeeded()
+        .then(() => this.playPreferredAudio(text))
+        .finally(() => resolve());
     });
+  }
+
+  private async waitForAudioUnlockIfNeeded(): Promise<void> {
+    if (this.audioUnlocked) {
+      return;
+    }
+
+    await Promise.race([
+      new Promise<void>((resolve) => {
+        this.pendingAudioUnlockResolvers.push(resolve);
+      }),
+      this.wait(8000),
+    ]);
+  }
+
+  private getPlaybackAudioContext(): AudioContext | null {
+    if (typeof window === 'undefined') {
+      return null;
+    }
+
+    const AudioCtx = (window as any).AudioContext || (window as any).webkitAudioContext;
+    if (!AudioCtx) {
+      return null;
+    }
+
+    if (!this.playbackAudioContext) {
+      try {
+        this.playbackAudioContext = new AudioCtx();
+      } catch {
+        return null;
+      }
+    }
+
+    return this.playbackAudioContext;
   }
 
   private async playPreferredAudio(text: string): Promise<void> {
@@ -343,6 +694,13 @@ export class VoiceCallQueueService {
       return false;
     }
 
+    if (this.synth.getVoices().length === 0) {
+      this.updateDiagnostics({
+        lastFallbackReason: 'sin_voces_disponibles',
+      });
+      return false;
+    }
+
     try {
       await this.playBrowserTts(text);
       return true;
@@ -353,36 +711,133 @@ export class VoiceCallQueueService {
 
   private async playServerGeneratedAudio(text: string): Promise<boolean> {
     try {
-      const audioBuffer = await this.getServerAudioBuffer(text);
-      if (!audioBuffer || audioBuffer.byteLength === 0) {
+      const rawAudioBuffer = await this.getServerAudioBuffer(text);
+      if (!rawAudioBuffer || rawAudioBuffer.byteLength === 0) {
+        console.warn('[VoiceCallQueue] playServerGeneratedAudio: buffer vacío o nulo');
         return false;
       }
 
-      const blob = new Blob([audioBuffer], { type: 'audio/wav' });
-      const objectUrl = URL.createObjectURL(blob);
-      const audio = new Audio(objectUrl);
+      console.log(`[VoiceCallQueue] playServerGeneratedAudio: buffer OK (${rawAudioBuffer.byteLength} bytes), intentando AudioContext`);
 
+      // Intentar reproducción con Web Audio API
+      const audioContext = this.getPlaybackAudioContext();
+      if (audioContext) {
+        try {
+          if (audioContext.state === 'suspended') {
+            console.log('[VoiceCallQueue] AudioContext suspendido, intentando resume...');
+            await audioContext.resume();
+            console.log(`[VoiceCallQueue] AudioContext state después de resume: ${audioContext.state}`);
+          }
+
+          if (audioContext.state !== 'running') {
+            console.warn(`[VoiceCallQueue] AudioContext state inesperado: ${audioContext.state}, fallback a HTMLAudio`);
+            throw new Error(`AudioContext state: ${audioContext.state}`);
+          }
+
+          const decodedBuffer = await audioContext.decodeAudioData(rawAudioBuffer.slice(0));
+          console.log(`[VoiceCallQueue] Audio decodificado: ${decodedBuffer.duration.toFixed(2)}s`);
+
+          const played = await new Promise<boolean>((resolve) => {
+            const source = audioContext.createBufferSource();
+            source.buffer = decodedBuffer;
+            source.connect(audioContext.destination);
+
+            let finished = false;
+            const playbackTimeoutMs = Math.max(5000, Math.ceil(decodedBuffer.duration * 1000) + 3000);
+            const timeoutId = setTimeout(() => {
+              console.warn('[VoiceCallQueue] Timeout reproduciendo con AudioContext');
+              done(false);
+            }, playbackTimeoutMs);
+
+            const done = (ok: boolean): void => {
+              if (finished) return;
+              finished = true;
+              clearTimeout(timeoutId);
+              try { source.disconnect(); } catch { /* ignorar */ }
+              resolve(ok);
+            };
+
+            source.onended = () => {
+              console.log('[VoiceCallQueue] AudioContext: reproducción completada');
+              done(true);
+            };
+
+            try {
+              source.start(0);
+              console.log('[VoiceCallQueue] AudioContext: source.start(0) OK');
+            } catch (e) {
+              console.error('[VoiceCallQueue] AudioContext: source.start() falló:', e);
+              done(false);
+            }
+          });
+
+          if (played) return true;
+          console.warn('[VoiceCallQueue] AudioContext falló, intentando HTMLAudio fallback');
+        } catch (ctxError) {
+          console.warn('[VoiceCallQueue] AudioContext error, fallback a HTMLAudio:', ctxError);
+        }
+      } else {
+        console.warn('[VoiceCallQueue] AudioContext no disponible, usando HTMLAudio');
+      }
+
+      // Fallback: HTMLAudio con blob URL
       return await new Promise<boolean>((resolve) => {
+        const blob = new Blob([rawAudioBuffer], { type: 'audio/wav' });
+        const blobUrl = URL.createObjectURL(blob);
+        const audio = new Audio(blobUrl);
+
         let finished = false;
+        const playbackTimeoutMs = 18000;
+        const timeoutId = setTimeout(() => {
+          console.warn('[VoiceCallQueue] HTMLAudio fallback: timeout');
+          done(false);
+        }, playbackTimeoutMs);
 
         const done = (ok: boolean): void => {
           if (finished) return;
           finished = true;
-          URL.revokeObjectURL(objectUrl);
+          clearTimeout(timeoutId);
+          URL.revokeObjectURL(blobUrl);
           resolve(ok);
         };
 
-        audio.onended = () => done(true);
-        audio.onerror = () => done(false);
+        audio.onended = () => {
+          console.log('[VoiceCallQueue] HTMLAudio: reproducción completada');
+          done(true);
+        };
+        audio.onerror = (e) => {
+          console.error('[VoiceCallQueue] HTMLAudio error:', e);
+          done(false);
+        };
 
-        const playAttempt = audio.play();
-        if (playAttempt && typeof playAttempt.then === 'function') {
-          playAttempt.catch(() => done(false));
-        }
+        audio.play().then(() => {
+          console.log('[VoiceCallQueue] HTMLAudio: play() iniciado');
+        }).catch((e) => {
+          console.error('[VoiceCallQueue] HTMLAudio: play() rechazado:', e);
+          done(false);
+        });
       });
-    } catch {
+    } catch (e) {
+      if (this.isAbortError(e)) {
+        console.warn('[VoiceCallQueue] playServerGeneratedAudio abort por timeout de red/TTS:', e);
+      } else {
+        console.error('[VoiceCallQueue] playServerGeneratedAudio error general:', e);
+      }
       return false;
     }
+  }
+
+  private isAbortError(error: unknown): boolean {
+    if (!error || typeof error !== 'object') {
+      return false;
+    }
+
+    const maybeError = error as { name?: string; message?: string };
+    if (maybeError.name === 'AbortError') {
+      return true;
+    }
+
+    return (maybeError.message ?? '').toLowerCase().includes('aborted');
   }
 
   private normalizeSpeechCacheKey(text: string): string {
@@ -390,13 +845,17 @@ export class VoiceCallQueueService {
   }
 
   private prefetchServerAudio(text: string): void {
+    if (!this.serverTtsEnabled) {
+      return;
+    }
+
     const key = this.normalizeSpeechCacheKey(text);
     if (!key || this.serverAudioCache.has(key) || this.serverAudioInFlight.has(key)) {
       return;
     }
 
     const request = this.eventsService
-      .synthesizeSpeech(text, 18000)
+      .synthesizeSpeech(text, 120000)
       .then((buffer) => {
         this.storeServerAudio(key, buffer);
         return buffer;
@@ -425,9 +884,20 @@ export class VoiceCallQueueService {
       }
     }
 
-    const generated = await this.eventsService.synthesizeSpeech(text, 18000);
-    this.storeServerAudio(key, generated);
-    return generated;
+    try {
+      const generated = await this.eventsService.synthesizeSpeech(text, 120000);
+      this.storeServerAudio(key, generated);
+      return generated;
+    } catch (error) {
+      if (!this.isAbortError(error)) {
+        throw error;
+      }
+
+      console.warn('[VoiceCallQueue] Timeout inicial de TTS. Reintentando con timeout ampliado...');
+      const generated = await this.eventsService.synthesizeSpeech(text, 180000);
+      this.storeServerAudio(key, generated);
+      return generated;
+    }
   }
 
   private storeServerAudio(key: string, audio: ArrayBuffer): void {
@@ -457,21 +927,16 @@ export class VoiceCallQueueService {
       const MAX_NOT_ALLOWED_RETRIES = 2;
 
       const getVoiceForLang = (lang: string): SpeechSynthesisVoice | null => {
-        const normalized = lang.toLowerCase();
         const voices = this.synth?.getVoices() ?? [];
+        const selected = this.pickPreferredVoiceForLang(voices, lang);
 
-        const preferredMatchesLang = this.preferredVoice
-          && this.preferredVoice.lang.toLowerCase().startsWith(normalized.split('-')[0]);
-        if (preferredMatchesLang) {
-          return this.preferredVoice;
+        if (selected) {
+          this.updateDiagnostics({
+            selectedVoice: `${selected.name} (${selected.lang})`,
+          });
         }
 
-        const localMatch = voices.find((v) => v.lang.toLowerCase().startsWith(normalized.split('-')[0]) && v.localService);
-        if (localMatch) {
-          return localMatch;
-        }
-
-        return voices.find((v) => v.lang.toLowerCase().startsWith(normalized.split('-')[0])) || null;
+        return selected;
       };
       
       const attemptSpeak = (lang: string, rate: number, retry: number) => {

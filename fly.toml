@@ -4,6 +4,10 @@ primary_region = 'dfw'
 [build]
   dockerfile = 'Dockerfile'
 
+[env]
+  NODE_ENV = 'production'
+  NODE_OPTIONS = '--max-old-space-size=64 --max-semi-space-size=6'
+
 [http_service]
   internal_port = 8080
   force_https = true
@@ -20,4 +24,4 @@ primary_region = 'dfw'
 
 [[vm]]
   size = 'shared-cpu-1x'
-  memory = '256mb'
+  memory = '512mb'
