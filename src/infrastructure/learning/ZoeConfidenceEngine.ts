@@ -82,7 +82,15 @@ export class ZoeConfidenceEngine {
     confidence = Math.max(0, Math.min(1, confidence));
 
     // Determine if Zoe should respond
-    const thresholdToUse = toolName ? this.minToolConfidence : this.minConfidenceThreshold;
+    let thresholdToUse = this.minConfidenceThreshold;
+    if (toolName) {
+      thresholdToUse = this.minToolConfidence;
+    } else if (route === 'llm_local') {
+      // Local models can be accurate but stylistically cautious; avoid over-filtering.
+      thresholdToUse = 0.45;
+    } else if (route === 'llm_premium') {
+      thresholdToUse = 0.55;
+    }
     const shouldRespond = confidence >= thresholdToUse;
 
     const reasoning = `${factors.join(' | ')} → ${(confidence * 100).toFixed(0)}%`;
@@ -165,7 +173,7 @@ export class ZoeConfidenceEngine {
    */
   private isFollowupQuestion(query: string): boolean {
     const followupPatterns = /\b(y|en|eso|esos|de ese|sobre eso|en relación|after|then|and)\b/i;
-    return followupPatterns.test(query) || !query.includes('?');
+    return followupPatterns.test(query);
   }
 
   /**

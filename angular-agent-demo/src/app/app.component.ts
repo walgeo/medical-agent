@@ -37,12 +37,6 @@ interface ChatMessage {
   tool?: string;
 }
 
-interface ChatOption {
-  label: string;
-  prompt?: string;
-  nextMenu?: 'root' | 'patients' | 'doctors' | 'status' | 'schedules';
-}
-
 @Component({
   selector: 'app-root',
   standalone: true,
@@ -81,8 +75,6 @@ export class AppComponent implements OnInit, OnDestroy {
   chatMessages: ChatMessage[] = [];
   chatInput = '';
   isChatLoading = false;
-  chatMode: 'guided' = 'guided';
-  currentChatMenu: 'root' | 'patients' | 'doctors' | 'status' | 'schedules' = 'root';
   private chatHistory: Array<{ role: string; content: string }> = [];
 
   // Voice call queue
@@ -329,6 +321,10 @@ export class AppComponent implements OnInit, OnDestroy {
     }
   }
 
+  setView(view: DashboardView): void {
+    this.activeView = view;
+  }
+
   async triggerEarlyVitalSigns(appointmentId: string): Promise<void> {
     await this.eventsService.triggerEarlyVitalSigns(appointmentId);
   }
@@ -357,47 +353,58 @@ export class AppComponent implements OnInit, OnDestroy {
       this.startEventStream();
     });
 
-    this.trackingTimer = setInterval(() => {
-      this.flushPendingDoctorCalls();
-      void this.refreshTrackedAppointments();
-    }, 20000);
-
-    this.dailyCheckTimer = setInterval(() => {
-      void this.handleDayRollover();
-    }, 60000);
-
-    if (typeof window !== 'undefined') {
-      document.addEventListener('click', this.unlockAlertAudio);
-      document.addEventListener('keydown', this.unlockAlertAudio);
-    }
-
-    // Suscribirse a cola de llamadas por voz
     this.voiceQueueSub = this.voiceCallQueue.queue.subscribe((queue) => {
       this.voiceQueue = queue;
     });
-    this.voiceCurrentSub = this.voiceCallQueue.currentCall.subscribe((call) => {
-      this.currentVoiceCall = call;
+    this.voiceCurrentSub = this.voiceCallQueue.currentCall.subscribe((currentCall) => {
+      this.currentVoiceCall = currentCall;
     });
-    this.voicePlayingSub = this.voiceCallQueue.isPlaying.subscribe((playing) => {
-      this.isVoiceCallPlaying = playing;
+    this.voicePlayingSub = this.voiceCallQueue.isPlaying.subscribe((isPlaying) => {
+      this.isVoiceCallPlaying = isPlaying;
     });
     this.voiceDiagnosticsSub = this.voiceCallQueue.diagnostics.subscribe((diagnostics) => {
       this.voiceDiagnostics = diagnostics;
     });
+
+    this.trackingTimer = setInterval(() => {
+      void this.refreshTrackedAppointments();
+      this.flushPendingDoctorCalls();
+    }, 15_000);
+
+    this.dailyCheckTimer = setInterval(() => {
+      void this.handleDayRollover();
+    }, 60_000);
+
+    document.addEventListener('click', this.unlockAlertAudio, { passive: true });
+    document.addEventListener('keydown', this.unlockAlertAudio, { passive: true });
+  }
+
+  ngOnDestroy(): void {
+    this.sub?.unsubscribe();
+    this.voiceQueueSub?.unsubscribe();
+    this.voiceCurrentSub?.unsubscribe();
+    this.voicePlayingSub?.unsubscribe();
+    this.voiceDiagnosticsSub?.unsubscribe();
+
+    if (this.trackingTimer) {
+      clearInterval(this.trackingTimer);
+    }
+    if (this.dailyCheckTimer) {
+      clearInterval(this.dailyCheckTimer);
+    }
+
+    document.removeEventListener('click', this.unlockAlertAudio);
+    document.removeEventListener('keydown', this.unlockAlertAudio);
   }
 
   private startEventStream(): void {
-    if (this.sub) return;
-
-    this.sub = this.eventsService
-      .streamWithReconnect((status, attempt) => {
-        this.status = status;
-        this.reconnectAttempts = attempt;
-      })
-      .subscribe((event) => {
+    this.sub?.unsubscribe();
+    this.sub = this.eventsService.streamWithReconnect((status, attempt) => {
+      this.status = status;
+      this.reconnectAttempts = attempt;
+    }).subscribe({
+      next: (event) => {
         if (!this.isCurrentDay(event.scheduledAt)) return;
-        if (this.shouldIgnoreIncomingEvent(event)) return;
-
         if (this.isDuplicateDoctorCallEvent(event)) return;
 
         this.allEvents = [event, ...this.allEvents].slice(0, 50);
@@ -407,170 +414,11 @@ export class AppComponent implements OnInit, OnDestroy {
         this.pushOverlayAlert(event);
         this.triggerBrowserNotification(event);
         this.playAlertSound(event);
-      });
-  }
-
-  private shouldIgnoreIncomingEvent(event: AgentEvent): boolean {
-    return event.type === 'patient_call_to_doctor' && !this.hasAssignedDoctor(event.doctorName);
-  }
-
-  ngOnDestroy(): void {
-    this.sub?.unsubscribe();
-    this.voiceQueueSub?.unsubscribe();
-    this.voiceCurrentSub?.unsubscribe();
-    this.voicePlayingSub?.unsubscribe();
-    this.voiceDiagnosticsSub?.unsubscribe();
-    if (this.trackingTimer) clearInterval(this.trackingTimer);
-    if (this.dailyCheckTimer) clearInterval(this.dailyCheckTimer);
-
-    if (typeof window !== 'undefined') {
-      document.removeEventListener('click', this.unlockAlertAudio);
-      document.removeEventListener('keydown', this.unlockAlertAudio);
-    }
-
-    if (this.alertAudioContext) {
-      void this.alertAudioContext.close().catch(() => {
-        // Ignorar errores de cierre de contexto.
-      });
-      this.alertAudioContext = null;
-    }
-  }
-
-  setFilter(filter: Filter): void {
-    this.activeFilter = filter;
-  }
-
-  setView(view: DashboardView): void {
-    this.activeView = view;
-
-    if (view === 'chat') {
-      this.initializeGuidedChat();
-    }
-  }
-
-  get chatMenuPrompt(): string {
-    switch (this.currentChatMenu) {
-      case 'patients':
-        return 'Pacientes: consultas clínicas accionables.';
-      case 'doctors':
-        return 'Médicos: carga y estado de atención.';
-      case 'status':
-        return 'Estado operativo del día.';
-      case 'schedules':
-        return 'Agenda y horarios de hoy.';
-      default:
-        return 'Zoe operativa: selecciona una consulta útil.';
-    }
-  }
-
-  get chatOptions(): ChatOption[] {
-    const menus: Record<string, ChatOption[]> = {
-      root: [
-        { label: '👥 Pacientes', nextMenu: 'patients' },
-        { label: '👨‍⚕️ Médicos', nextMenu: 'doctors' },
-        { label: '📍 Estados de citas', nextMenu: 'status' },
-        { label: '🕐 Horarios / Agenda', nextMenu: 'schedules' },
-        { label: '📊 Resumen del día', prompt: 'resumen de citas del día', nextMenu: 'root' },
-      ],
-      patients: [
-        { label: 'Pacientes de hoy', prompt: 'nombres de los pacientes de hoy', nextMenu: 'patients' },
-        { label: 'Pacientes por especialidad', prompt: 'pacientes por especialidad', nextMenu: 'patients' },
-        { label: 'Citas por especialidad y médico', prompt: 'tabla de citas por especialidad y médico', nextMenu: 'patients' },
-        { label: '⬅ Volver al menú principal', nextMenu: 'root' },
-      ],
-      doctors: [
-        { label: 'Doctores atendiendo', prompt: 'doctores que están atendiendo', nextMenu: 'doctors' },
-        { label: 'Citas por doctor', prompt: 'citas por doctor', nextMenu: 'doctors' },
-        { label: 'Atendidas por doctor', prompt: 'atendidas por doctor', nextMenu: 'doctors' },
-        { label: '⬅ Volver al menú principal', nextMenu: 'root' },
-      ],
-      status: [
-        { label: 'Estado actual operativo', prompt: 'estado actual', nextMenu: 'status' },
-        { label: 'Citas reagendadas', prompt: 'citas reagendadas', nextMenu: 'status' },
-        { label: 'Resumen de citas del día', prompt: 'resumen de citas del día', nextMenu: 'status' },
-        { label: '⬅ Volver al menú principal', nextMenu: 'root' },
-      ],
-      schedules: [
-        { label: 'Agenda del día', prompt: 'horarios', nextMenu: 'schedules' },
-        { label: 'Citas de hoy', prompt: 'citas de hoy', nextMenu: 'schedules' },
-        { label: 'Tabla de citas de hoy', prompt: 'tabla de citas de hoy', nextMenu: 'schedules' },
-        { label: '⬅ Volver al menú principal', nextMenu: 'root' },
-      ],
-    };
-
-    return menus[this.currentChatMenu] ?? menus['root'];
-  }
-
-  async selectChatOption(option: ChatOption): Promise<void> {
-    if (this.isChatLoading) return;
-
-    if (option.nextMenu && !option.prompt) {
-      this.currentChatMenu = option.nextMenu;
-      return;
-    }
-
-    if (option.prompt) {
-      await this.sendPredefinedChatMessage(option.label, option.prompt);
-    }
-
-    if (option.nextMenu) {
-      this.currentChatMenu = option.nextMenu;
-    }
-  }
-
-  private initializeGuidedChat(): void {
-    if (this.chatMessages.length > 0) return;
-
-    this.chatMessages.push({
-      role: 'zoe',
-      content:
-        'Hola. Soy Zoe. Trabajaremos con consultas clínicas claras y resultados operativos. Selecciona una categoría:',
-      isHtml: false,
-      timestamp: new Date().toISOString(),
-      route: 'tool',
-      confidence: 0.95,
-      tool: 'guided_menu',
+      },
+      error: () => {
+        this.status = 'desconectado';
+      },
     });
-  }
-
-  private async sendPredefinedChatMessage(displayText: string, backendPrompt: string): Promise<void> {
-    this.chatMessages.push({
-      role: 'user',
-      content: displayText,
-      isHtml: false,
-      timestamp: new Date().toISOString(),
-    });
-
-    this.isChatLoading = true;
-
-    try {
-      const result = await this.eventsService.sendChatMessage(backendPrompt, this.chatHistory);
-
-      this.chatHistory.push({ role: 'user', content: backendPrompt });
-      this.chatHistory.push({ role: 'assistant', content: result.response });
-      if (this.chatHistory.length > 20) {
-        this.chatHistory = this.chatHistory.slice(-20);
-      }
-
-      this.chatMessages.push({
-        role: 'zoe',
-        content: result.response,
-        isHtml: result.isHtml,
-        confidence: result.confidence,
-        route: result.route,
-        tool: result.tool,
-        timestamp: new Date().toISOString(),
-      });
-    } catch {
-      this.chatMessages.push({
-        role: 'zoe',
-        content: 'No pude procesar esa opción en este momento. Intenta otra opción del menú.',
-        isHtml: false,
-        timestamp: new Date().toISOString(),
-      });
-    } finally {
-      this.isChatLoading = false;
-    }
   }
 
   async markNurseAlertAsAttended(appointmentId: string): Promise<void> {

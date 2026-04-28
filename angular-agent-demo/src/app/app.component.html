@@ -15,12 +15,7 @@
       {{ notificationStatusMessage }}
     </p>
 
-    <div class="voice-test-controls">
-      <p class="voice-test-label">Pruebas de voz:</p>
-      <button class="voice-test-btn" (click)="triggerVoiceBurst(5)">Probar 5 llamadas</button>
-      <button class="voice-test-btn" (click)="triggerVoiceBurst(10)">Probar 10 llamadas</button>
-    </div>
-    <p class="voice-test-status" *ngIf="voiceTestStatusMessage">{{ voiceTestStatusMessage }}</p>
+
 
   </header>
 
@@ -381,8 +376,8 @@
 
     <div class="chat-messages" #chatContainer>
       <div class="chat-welcome" *ngIf="chatMessages.length === 0">
-        <p>Hola, soy <strong>Zoe</strong>. Este chat ahora funciona en modo guiado.</p>
-        <p>Elige opciones predefinidas para obtener respuestas rápidas y consistentes.</p>
+        <p>Hola, soy <strong>Zoe</strong>.</p>
+        <p>Escribe tu consulta sobre citas médicas, pacientes, doctores u operación clínica.</p>
       </div>
 
       <div class="chat-message"
@@ -421,17 +416,26 @@
       </div>
     </div>
 
-    <div class="chat-guided-row">
-      <p class="chat-guided-title">{{ chatMenuPrompt }}</p>
-      <div class="chat-options-grid">
-        <button
-          *ngFor="let option of chatOptions"
-          class="chat-option-btn"
-          (click)="selectChatOption(option)"
-          [disabled]="isChatLoading"
-        >
-          {{ option.label }}
-        </button>
+    <div class="chat-input-shell">
+      <div class="chat-input-row">
+        <div class="chat-input-group">
+          <input
+            class="chat-input"
+            type="text"
+            placeholder="Escribe tu consulta a Zoe..."
+            [(ngModel)]="chatInput"
+            [disabled]="isChatLoading"
+            (keyup.enter)="sendChatMessage()"
+          />
+          <button
+            class="chat-send"
+            type="button"
+            [disabled]="isChatLoading || !chatInput.trim()"
+            (click)="sendChatMessage()"
+          >
+            Enviar
+          </button>
+        </div>
       </div>
     </div>
   </section>

@@ -20,6 +20,12 @@ export interface ChatResponse {
   adapted?: boolean;
 }
 
+interface ChatRequestPayload {
+  message: string;
+  history: Array<{ role: string; content: string }>;
+  forceLlm?: boolean;
+}
+
 export interface AppointmentRecommendation {
   source?: 'llm' | 'fallback';
   priority: RecommendationPriority;
@@ -285,12 +291,31 @@ export class MedicalAgentEventsService {
   async sendChatMessage(
     message: string,
     history: Array<{ role: string; content: string }>,
+    options?: { forceLlm?: boolean; timeoutMs?: number },
   ): Promise<ChatResponse> {
-    const response = await fetch(`${this.apiBaseUrl}/chat`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ message, history }),
-    });
+    const payload: ChatRequestPayload = { message, history };
+    if (options?.forceLlm) {
+      payload.forceLlm = true;
+    }
+
+    const timeoutMs = options?.timeoutMs ?? 45000;
+    const useTimeout = Number.isFinite(timeoutMs) && timeoutMs > 0;
+    const controller = useTimeout ? new AbortController() : null;
+    const timeoutId = useTimeout
+      ? setTimeout(() => controller?.abort(new DOMException('chat_timeout', 'AbortError')), timeoutMs)
+      : null;
+
+    let response: Response;
+    try {
+      response = await fetch(`${this.apiBaseUrl}/chat`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+        signal: controller?.signal,
+      });
+    } finally {
+      if (timeoutId) clearTimeout(timeoutId);
+    }
 
     if (!response.ok) {
       throw new Error(`Error en el chat. status=${response.status}`);

@@ -664,6 +664,7 @@ export class SseEventPublisher implements IEventPublisher {
       const body = (await this.readJsonBody(req)) as {
         message?: unknown;
         history?: unknown;
+        forceLlm?: unknown;
       };
 
       const message = typeof body.message === 'string' ? body.message.trim() : '';
@@ -672,8 +673,21 @@ export class SseEventPublisher implements IEventPublisher {
         return;
       }
 
+      const forceLlm = body.forceLlm === true;
+
       const history = Array.isArray(body.history) ? body.history : [];
       const recentUserMessages = this.findRecentUserMessages(history, 3);
+      const maxLlmHistoryMessages = this.readPositiveIntEnv('ZOE_LLM_MAX_HISTORY_MESSAGES', 6);
+      const llmHistory = history
+        .filter((item): item is { role: 'user' | 'assistant'; content: string } => {
+          if (!item || typeof item !== 'object') return false;
+          const role = (item as { role?: unknown }).role;
+          const content = (item as { content?: unknown }).content;
+          if ((role !== 'user' && role !== 'assistant') || typeof content !== 'string') return false;
+          return content.trim().length > 0;
+        })
+        .slice(-maxLlmHistoryMessages)
+        .map((item) => ({ role: item.role, content: item.content.trim() }));
 
       const appointments = this.appointmentService
         ? await this.appointmentService.getTodayTrackedAppointments()
@@ -692,59 +706,30 @@ export class SseEventPublisher implements IEventPublisher {
         reagendada: a.rescheduledTo?.toISOString() ?? null,
       }));
 
-      const toolResponse = this.executeZoeTooling(message, recentUserMessages, appointmentsContext);
-      if (toolResponse) {
-        const adapted = this.adaptZoeResponse(
-          message,
-          toolResponse.response,
-          toolResponse.isHtml,
-          toolResponse.route,
-          toolResponse.tool,
-        );
-        this.sendJson(res, 200, { ...adapted, ...toolResponse });
-        return;
-      }
+      const maxLlmAppointments = this.readPositiveIntEnv('ZOE_LLM_MAX_APPOINTMENTS_CONTEXT', 8);
+      const isLightweightChat = this.isLightweightChatMessage(message);
+      const llmAppointmentsContext = isLightweightChat
+        ? []
+        : appointmentsContext.slice(0, maxLlmAppointments);
+      const compactAppointments = llmAppointmentsContext.map((a) => ({
+        id: a.id,
+        paciente: a.paciente,
+        doctor: a.doctor,
+        especialidad: a.especialidad,
+        inicio: a.inicio,
+        estado: a.estado,
+      }));
+      const statusSummary = appointmentsContext.reduce<Record<string, number>>((acc, current) => {
+        acc[current.estado] = (acc[current.estado] ?? 0) + 1;
+        return acc;
+      }, {});
 
-      const deterministic = this.zoeDeterministicReply(message, appointmentsContext, recentUserMessages);
-      if (deterministic) {
-        const adapted = this.adaptZoeResponse(message, deterministic.response, deterministic.isHtml, 'fallback');
-        this.sendJson(res, 200, { ...adapted, tool: 'deterministic', route: 'fallback' });
-        return;
-      }
-
-      if (!this.shouldUseLlmForMessage(message)) {
-        const fallback = this.zoeFallback(message, appointmentsContext, recentUserMessages);
-        const adapted = this.adaptZoeResponse(message, fallback.response, fallback.isHtml, 'fallback', 'fallback');
-        this.sendJson(res, 200, { ...adapted, tool: 'fallback', route: 'fallback' });
-        return;
-      }
-
-      const systemPrompt = `Eres Zoe, una asistente de inteligencia artificial especializada en gestión de citas médicas.
-    Tu nombre significa "vida" y tu prioridad es la vida del paciente.
-    Hablas en español con estilo operativo: clara, breve, precisa y útil.
-
-    RESTRICCIÓN IMPORTANTE:
-    - Solo respondes sobre citas médicas, pacientes, doctores, especialidades y operación clínica.
-    - Si te preguntan algo fuera de ese ámbito: "Mi especialidad son las citas médicas. Si quieres, te ayudo con eso."
-
-    ESTILO DE RESPUESTA:
-    - Primero da la respuesta directa en una oración.
-    - Luego agrega 1-2 datos concretos de soporte si aportan valor.
-    - Evita rodeos, disculpas innecesarias y texto genérico.
-    - No inventes datos; usa únicamente la información recibida.
-
-    Datos de citas de hoy (${new Date().toLocaleDateString('es-CR')}):
-    ${JSON.stringify(appointmentsContext, null, 2)}
-
-    INSTRUCCIONES DE FORMATO:
-    - Para respuestas conversacionales: texto plano en español.
-    - Cuando el usuario pida tablas, gráficos, estadísticos o visualizaciones: responde ÚNICAMENTE con HTML.
-    - El HTML usa estilos inline o un bloque <style> al inicio del fragmento.
-    - Paleta de colores: fondo #f0f9ff, acentos #0f766e y #1d4ed8, texto #0f172a.
-    - Gráficas de barras: divs con width en % proporcional al valor máximo.
-    - NO uses JavaScript en el HTML. NO uses librerías externas.
-    - El HTML es un fragmento (sin html/head/body).
-    - Para indicar que la respuesta es HTML, envuélvela exactamente así: <<<HTML>>>...contenido html...<<<END_HTML>>>`;
+      const systemPrompt = this.buildZoeSystemPrompt({
+        isLightweightChat,
+        compactAppointments,
+        totalAppointments: appointmentsContext.length,
+        statusSummary,
+      });
 
       const llmConfigs = this.buildZoeLlmConfigs();
       if (llmConfigs.length === 0) {
@@ -756,9 +741,15 @@ export class SseEventPublisher implements IEventPublisher {
 
       for (const config of llmConfigs) {
         try {
-          const llmResult = await this.requestZoeLlm(config, systemPrompt, history, message);
+          const llmResult = await this.requestZoeLlm(
+            config,
+            systemPrompt,
+            isLightweightChat ? [] : llmHistory,
+            message,
+            isLightweightChat ? 48 : this.readPositiveIntEnv('ZOE_LLM_MAX_TOKENS', 180),
+          );
           const route = config.name === 'premium' ? 'llm_premium' : 'llm_local';
-          const adapted = this.adaptZoeResponse(message, llmResult.response, llmResult.isHtml, route as any, route);
+          const adapted = this.adaptZoeResponse(message, llmResult.response, llmResult.isHtml, route as any);
           this.sendJson(res, 200, { ...adapted, tool: route, route: 'llm' });
           return;
         } catch (error) {
@@ -1565,6 +1556,62 @@ export class SseEventPublisher implements IEventPublisher {
     return deepAnalysisKeywords.some((keyword) => lower.includes(keyword));
   }
 
+  private isLightweightChatMessage(message: string): boolean {
+    const lower = this.normalizeText(message);
+    const tokenCount = lower.split(/\s+/).filter(Boolean).length;
+
+    return (
+      tokenCount <= 4 &&
+      (
+        this.isGreetingMessage(lower) ||
+        this.isIdentityQuestion(lower) ||
+        lower === 'gracias' ||
+        lower === 'ok' ||
+        lower === 'oka' ||
+        lower === 'buen dia' ||
+        lower === 'buen dia zoe' ||
+        lower === 'buenas' ||
+        lower === 'hola buenos dias'
+      )
+    );
+  }
+
+  private buildZoeSystemPrompt(input: {
+    isLightweightChat: boolean;
+    compactAppointments: Array<{
+      id: string;
+      paciente: string;
+      doctor: string;
+      especialidad: string;
+      inicio: string;
+      estado: string;
+    }>;
+    totalAppointments: number;
+    statusSummary: Record<string, number>;
+  }): string {
+    const basePrompt = `Eres Zoe, un modelo de IA para operación de citas médicas.
+Hablas en español con estilo claro, breve, natural y útil.
+Responde siempre desde el modelo, sin frases plantilladas ni respuestas predeterminadas.
+Debes respetar las reglas de negocio: no inventes datos, usa solo el contexto disponible y mantente dentro del ámbito de citas médicas, pacientes, doctores, especialidades y operación clínica.
+Si la pregunta sale del dominio, redirígela brevemente hacia la gestión de citas médicas con lenguaje natural.
+
+INSTRUCCIONES DE FORMATO:
+- Para respuestas conversacionales: texto plano en español.
+- Cuando el usuario pida tablas, gráficos, estadísticos o visualizaciones: responde ÚNICAMENTE con HTML.
+- El HTML usa estilos inline o un bloque <style> al inicio del fragmento.
+- Paleta de colores: fondo #f0f9ff, acentos #0f766e y #1d4ed8, texto #0f172a.
+- Gráficas de barras: divs con width en % proporcional al valor máximo.
+- NO uses JavaScript en el HTML. NO uses librerías externas.
+- El HTML es un fragmento (sin html/head/body).
+- Para indicar que la respuesta es HTML, envuélvela exactamente así: <<<HTML>>>...contenido html...<<<END_HTML>>>`;
+
+    if (input.isLightweightChat) {
+      return `${basePrompt}\n\nPara saludos o mensajes breves, responde en una sola oración natural y corta.`;
+    }
+
+    return `${basePrompt}\n\nDatos de citas de hoy (${new Date().toLocaleDateString('es-CR')})\nResumen por estado: ${JSON.stringify(input.statusSummary)}\nMuestra de citas (${input.compactAppointments.length} de ${input.totalAppointments}):\n${JSON.stringify(input.compactAppointments)}`;
+  }
+
   private isIdentityQuestion(normalizedMessage: string): boolean {
     return (
       normalizedMessage.includes('quien eres') ||
@@ -1755,6 +1802,7 @@ export class SseEventPublisher implements IEventPublisher {
     systemPrompt: string,
     history: unknown[],
     message: string,
+    maxTokens: number,
   ): Promise<{ response: string; isHtml: boolean }> {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), config.timeoutMs);
@@ -1778,7 +1826,7 @@ export class SseEventPublisher implements IEventPublisher {
             { role: 'user', content: message },
           ],
           temperature: 0.2,
-          max_tokens: 700,
+          max_tokens: maxTokens,
         }),
         signal: controller.signal,
       });
@@ -2560,6 +2608,32 @@ export class SseEventPublisher implements IEventPublisher {
   }
 
   private async generateSpeechWav(text: string): Promise<Buffer> {
+    const forcedEngine = (process.env.TTS_ENGINE ?? '').trim().toLowerCase();
+
+    if (forcedEngine === 'espeak' || forcedEngine === 'espeak-ng') {
+      const executable = forcedEngine;
+      const voice = process.env.TTS_ESPEAK_VOICE ?? 'es-la+f3';
+      const speed = this.readPositiveIntEnv('TTS_ESPEAK_SPEED', 140);
+      const pitch = this.readPositiveIntEnv('TTS_ESPEAK_PITCH', 42);
+      const args = ['-v', voice, '-s', String(speed), '-p', String(pitch), '--stdout', text];
+      this.logger.log('TTS_COMMAND_SELECTED', `Motor seleccionado (forzado): ${executable}`);
+      return await this.runCommandCapture(executable, args, false);
+    }
+
+    if (forcedEngine === 'pico2wave') {
+      const tempFile = join(tmpdir(), `medical-agent-tts-${randomUUID()}.wav`);
+      try {
+        const args = this.buildTtsFileArgs('pico2wave', tempFile, text);
+        this.logger.log('TTS_COMMAND_SELECTED', 'Motor seleccionado (forzado): pico2wave');
+        await this.runCommand('pico2wave', args, false);
+        return await readFile(tempFile);
+      } finally {
+        void unlink(tempFile).catch(() => {
+          // Ignorar errores de limpieza de archivo temporal.
+        });
+      }
+    }
+
     const command = this.resolveTtsCommand();
     if (!command) {
       throw new Error('No se encontro motor TTS del sistema (piper/espeak-ng/espeak/pico2wave).');
@@ -2644,13 +2718,20 @@ export class SseEventPublisher implements IEventPublisher {
 
     const preferredEngine = (process.env.TTS_ENGINE ?? '').trim().toLowerCase();
     const defaultOrder: Array<'piper' | 'piper-tts' | 'pico2wave' | 'espeak-ng' | 'espeak'> = ['piper-tts', 'piper', 'pico2wave', 'espeak-ng', 'espeak'];
-    const candidates: Array<'piper' | 'piper-tts' | 'espeak-ng' | 'espeak' | 'pico2wave'> = preferredEngine === 'piper' || preferredEngine === 'piper-tts'
-      ? ['piper-tts', 'piper', 'pico2wave', 'espeak-ng', 'espeak']
-      : preferredEngine === 'pico2wave'
-        ? ['pico2wave', 'piper-tts', 'piper', 'espeak-ng', 'espeak']
-        : preferredEngine === 'espeak' || preferredEngine === 'espeak-ng'
-          ? ['espeak-ng', 'espeak', 'piper-tts', 'piper', 'pico2wave']
-          : defaultOrder;
+
+    let candidates: Array<'piper' | 'piper-tts' | 'espeak-ng' | 'espeak' | 'pico2wave'> = defaultOrder;
+    let strictPreferredEngine = false;
+
+    if (preferredEngine === 'piper' || preferredEngine === 'piper-tts') {
+      candidates = ['piper-tts', 'piper'];
+      strictPreferredEngine = true;
+    } else if (preferredEngine === 'pico2wave') {
+      candidates = ['pico2wave'];
+      strictPreferredEngine = true;
+    } else if (preferredEngine === 'espeak' || preferredEngine === 'espeak-ng') {
+      candidates = ['espeak-ng', 'espeak'];
+      strictPreferredEngine = true;
+    }
 
     for (const candidate of candidates) {
       const localProbe = spawnSync(candidate, ['--help'], { encoding: 'utf8' });
@@ -2686,6 +2767,10 @@ export class SseEventPublisher implements IEventPublisher {
       if ((candidate === 'piper' || candidate === 'piper-tts') && (localProbe.status === 0 || hostProbe.status === 0)) {
         this.logger.log('TTS_PIPER_INCOMPATIBLE', `Se detecto binario ${candidate} pero no es Piper TTS CLI compatible.`);
       }
+    }
+
+    if (strictPreferredEngine && preferredEngine) {
+      this.logger.log('TTS_ENGINE_NOT_AVAILABLE', `No se encontro motor preferido TTS_ENGINE=${preferredEngine}.`);
     }
 
     this.detectedTtsCommand = null;
@@ -3030,6 +3115,29 @@ export class SseEventPublisher implements IEventPublisher {
       const child = spawn(spawnCommand, spawnArgs, { stdio: ['ignore', 'pipe', 'pipe'] });
       const chunks: Buffer[] = [];
       const errChunks: Buffer[] = [];
+      const timeoutMs = this.readPositiveIntEnv('TTS_COMMAND_TIMEOUT_MS', 20000);
+      let settled = false;
+
+      const doneReject = (error: Error): void => {
+        if (settled) return;
+        settled = true;
+        reject(error);
+      };
+
+      const doneResolve = (output: Buffer): void => {
+        if (settled) return;
+        settled = true;
+        resolve(output);
+      };
+
+      const timeoutId = setTimeout(() => {
+        try {
+          child.kill('SIGKILL');
+        } catch {
+          // Ignorar error al forzar cierre.
+        }
+        doneReject(new Error(`Comando ${command} excedio timeout de ${timeoutMs}ms.`));
+      }, timeoutMs);
 
       child.stdout.on('data', (chunk: Buffer) => {
         chunks.push(chunk);
@@ -3040,23 +3148,25 @@ export class SseEventPublisher implements IEventPublisher {
       });
 
       child.on('error', (error) => {
-        reject(error);
+        clearTimeout(timeoutId);
+        doneReject(error);
       });
 
       child.on('close', (code) => {
+        clearTimeout(timeoutId);
         if (code !== 0) {
           const detail = Buffer.concat(errChunks).toString('utf8').trim();
-          reject(new Error(`Comando ${command} finalizo con codigo ${code ?? 'null'}. ${detail}`));
+          doneReject(new Error(`Comando ${command} finalizo con codigo ${code ?? 'null'}. ${detail}`));
           return;
         }
 
         const output = Buffer.concat(chunks);
         if (output.length === 0) {
-          reject(new Error(`Comando ${command} no devolvio audio.`));
+          doneReject(new Error(`Comando ${command} no devolvio audio.`));
           return;
         }
 
-        resolve(output);
+        doneResolve(output);
       });
     });
   }
@@ -3067,23 +3177,48 @@ export class SseEventPublisher implements IEventPublisher {
       const spawnArgs = viaHost ? ['--host', command, ...args] : args;
       const child = spawn(spawnCommand, spawnArgs, { stdio: ['pipe', 'ignore', 'pipe'] });
       const errChunks: Buffer[] = [];
+      const timeoutMs = this.readPositiveIntEnv('TTS_COMMAND_TIMEOUT_MS', 20000);
+      let settled = false;
+
+      const doneReject = (error: Error): void => {
+        if (settled) return;
+        settled = true;
+        reject(error);
+      };
+
+      const doneResolve = (): void => {
+        if (settled) return;
+        settled = true;
+        resolve();
+      };
+
+      const timeoutId = setTimeout(() => {
+        try {
+          child.kill('SIGKILL');
+        } catch {
+          // Ignorar error al forzar cierre.
+        }
+        doneReject(new Error(`Comando ${command} excedio timeout de ${timeoutMs}ms.`));
+      }, timeoutMs);
 
       child.stderr.on('data', (chunk: Buffer) => {
         errChunks.push(chunk);
       });
 
       child.on('error', (error) => {
-        reject(error);
+        clearTimeout(timeoutId);
+        doneReject(error);
       });
 
       child.on('close', (code) => {
+        clearTimeout(timeoutId);
         if (code === 0) {
-          resolve();
+          doneResolve();
           return;
         }
 
         const detail = Buffer.concat(errChunks).toString('utf8').trim();
-        reject(new Error(`Comando ${command} finalizo con codigo ${code ?? 'null'}. ${detail}`));
+        doneReject(new Error(`Comando ${command} finalizo con codigo ${code ?? 'null'}. ${detail}`));
       });
 
       child.stdin.write(input);

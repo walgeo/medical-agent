@@ -27,6 +27,9 @@ FROM node:20-slim
 
 WORKDIR /app
 
+# Lightweight fallback TTS engine for low-memory runtimes.
+RUN apt-get update && apt-get install -y --no-install-recommends espeak-ng && rm -rf /var/lib/apt/lists/*
+
 # Only runtime deps
 COPY package.json ./
 RUN npm install --omit=dev

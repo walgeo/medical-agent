@@ -783,8 +783,6 @@ td {
 	font-size: 0.95rem;
 }
 .chat-welcome p { margin: 4px 0; }
-.chat-welcome ul { margin: 6px 0 0 16px; }
-.chat-welcome li { margin: 3px 0; }
 .chat-message {
 	display: flex;
 	gap: 10px;
@@ -866,12 +864,18 @@ td {
 	0%, 80%, 100% { transform: translateY(0); }
 	40% { transform: translateY(-6px); }
 }
-.chat-input-row {
-	display: flex;
-	gap: 8px;
+.chat-input-shell {
 	padding: 12px 16px;
 	border-top: 1px solid #e2e8f0;
 	background: #f8fafc;
+}
+
+.chat-input-row {
+	display: flex;
+	padding: 12px;
+	border: 1px solid #dbeafe;
+	border-radius: 12px;
+	background: #f8fbff;
 }
 .chat-input {
 	flex: 1;
@@ -895,48 +899,19 @@ td {
 .chat-send:disabled { opacity: 0.45; cursor: not-allowed; }
 .chat-send:not(:disabled):hover { background: #1e40af; }
 
-.chat-guided-row {
-	padding: 12px 16px;
-	border-top: 1px solid #e2e8f0;
-	background: #f8fafc;
+.chat-input-group {
 	display: flex;
-	flex-direction: column;
-	gap: 10px;
-}
-
-.chat-guided-title {
-	margin: 0;
-	font-size: 0.92rem;
-	color: #334155;
-	font-weight: 700;
-}
-
-.chat-options-grid {
-	display: grid;
-	grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
 	gap: 8px;
 }
 
-.chat-option-btn {
-	padding: 10px 12px;
-	border: 1px solid #93c5fd;
-	border-radius: 10px;
-	background: #eff6ff;
-	color: #1e3a8a;
-	font-weight: 600;
-	text-align: left;
-	cursor: pointer;
-	transition: all 0.2s ease;
-}
+@media (max-width: 720px) {
+	.chat-input-group {
+		flex-direction: column;
+	}
 
-.chat-option-btn:hover:not(:disabled) {
-	background: #dbeafe;
-	border-color: #60a5fa;
-}
-
-.chat-option-btn:disabled {
-	opacity: 0.55;
-	cursor: not-allowed;
+	.chat-send {
+		width: 100%;
+	}
 }
 
 /* ===== LLAMADAS DE VOZ ===== */

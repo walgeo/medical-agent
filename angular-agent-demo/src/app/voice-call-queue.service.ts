@@ -108,6 +108,8 @@ export class VoiceCallQueueService {
   private readonly serverAudioCache = new Map<string, ArrayBuffer>();
   private readonly serverAudioInFlight = new Map<string, Promise<ArrayBuffer | null>>();
   private readonly maxServerAudioCacheEntries = 40;
+  private readonly serverTtsPlaybackTimeoutMs = 15000;
+  private readonly serverTtsPrefetchTimeoutMs = 45000;
   private preferBrowserTts = false;
   private serverTtsEnabled = true;
   private voiceProbeAttempts = 0;
@@ -855,7 +857,7 @@ export class VoiceCallQueueService {
     }
 
     const request = this.eventsService
-      .synthesizeSpeech(text, 120000)
+      .synthesizeSpeech(text, this.serverTtsPrefetchTimeoutMs)
       .then((buffer) => {
         this.storeServerAudio(key, buffer);
         return buffer;
@@ -878,14 +880,17 @@ export class VoiceCallQueueService {
 
     const inFlight = this.serverAudioInFlight.get(key);
     if (inFlight) {
-      const result = await inFlight;
+      const result = await Promise.race<ArrayBuffer | null>([
+        inFlight,
+        this.wait(this.serverTtsPlaybackTimeoutMs).then(() => null),
+      ]);
       if (result && result.byteLength > 0) {
         return result;
       }
     }
 
     try {
-      const generated = await this.eventsService.synthesizeSpeech(text, 120000);
+      const generated = await this.eventsService.synthesizeSpeech(text, this.serverTtsPlaybackTimeoutMs);
       this.storeServerAudio(key, generated);
       return generated;
     } catch (error) {
@@ -893,10 +898,8 @@ export class VoiceCallQueueService {
         throw error;
       }
 
-      console.warn('[VoiceCallQueue] Timeout inicial de TTS. Reintentando con timeout ampliado...');
-      const generated = await this.eventsService.synthesizeSpeech(text, 180000);
-      this.storeServerAudio(key, generated);
-      return generated;
+      console.warn('[VoiceCallQueue] Timeout de TTS en reproducción activa. Se aplicará fallback para evitar bloqueo.');
+      return null;
     }
   }
 

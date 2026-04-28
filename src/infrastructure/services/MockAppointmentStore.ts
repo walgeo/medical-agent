@@ -63,7 +63,7 @@ export class MockAppointmentStore {
 
     const lastNames = [
       'Rios',
-      'Herrera',
+      'Herrera', 
       'Vega',
       'Solis',
       'Mena',
